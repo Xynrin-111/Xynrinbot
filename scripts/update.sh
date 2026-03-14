@@ -5,9 +5,9 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 META_FILE="$PROJECT_DIR/.install-meta"
 
-REPO_SLUG_DEFAULT="Xynrin-111/linux-tool"
+REPO_SLUG_DEFAULT="Xynrin-111/Xynrinbot"
 REPO_REF_DEFAULT="main"
-TOOL_SUBDIR_DEFAULT="nonebot-group-verify-bot"
+TOOL_SUBDIR_DEFAULT=""
 
 REPO_SLUG="${REPO_SLUG:-}"
 REPO_REF="${REPO_REF:-}"
@@ -104,15 +104,27 @@ main() {
   echo "更新项目..."
   echo "仓库：$REPO_SLUG"
   echo "分支：$REPO_REF"
-  echo "子目录：$TOOL_SUBDIR"
+  if [ -n "$TOOL_SUBDIR" ]; then
+    echo "子目录：$TOOL_SUBDIR"
+  else
+    echo "子目录：仓库根目录"
+  fi
 
   download_file "$archive_url" "$tmp_dir/repo.tar.gz"
   tar -xzf "$tmp_dir/repo.tar.gz" -C "$tmp_dir"
   extract_root="$(find "$tmp_dir" -maxdepth 1 -mindepth 1 -type d | head -n 1)"
-  source_dir="$extract_root/$TOOL_SUBDIR"
+  if [ -n "$TOOL_SUBDIR" ]; then
+    source_dir="$extract_root/$TOOL_SUBDIR"
+  else
+    source_dir="$extract_root"
+  fi
 
   if [ ! -d "$source_dir" ]; then
-    echo "错误：在仓库归档中未找到子目录：$TOOL_SUBDIR"
+    if [ -n "$TOOL_SUBDIR" ]; then
+      echo "错误：在仓库归档中未找到子目录：$TOOL_SUBDIR"
+    else
+      echo "错误：仓库归档根目录不存在，无法继续更新。"
+    fi
     rm -rf "$tmp_dir"
     exit 1
   fi

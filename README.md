@@ -114,11 +114,11 @@ bash scripts/run.sh
 
 ## 在线安装
 
-如果后续这个项目作为 `linux-tool` 仓库里的子工具发布，可以直接下载顶层 `install.sh`。
+如果你把这个项目直接作为独立仓库发布到 GitHub，可以直接下载仓库根目录的 `install.sh`。
 
 默认行为：
 
-- 从 GitHub 下载子工具目录
+- 从 GitHub 下载整个项目仓库
 - 复制到本地目标目录
 - 自动进入交互式安装配置
 - 自动执行初始化
@@ -127,22 +127,21 @@ bash scripts/run.sh
 示例：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Xynrin-111/linux-tool/main/nonebot-group-verify-bot/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Xynrin-111/Xynrinbot/main/install.sh | bash
 ```
 
 也可以自定义：
 
 ```bash
 REPO_REF=main \
-TOOL_SUBDIR=nonebot-group-verify-bot \
-INSTALL_DIR=$HOME/nonebot-group-verify-bot \
-curl -fsSL https://raw.githubusercontent.com/Xynrin-111/linux-tool/main/nonebot-group-verify-bot/install.sh | bash
+INSTALL_DIR=$HOME/Xynrinbot \
+curl -fsSL https://raw.githubusercontent.com/Xynrin-111/Xynrinbot/main/install.sh | bash
 ```
 
 如果你要下载后直接启动：
 
 ```bash
-AUTO_START=1 curl -fsSL https://raw.githubusercontent.com/Xynrin-111/linux-tool/main/nonebot-group-verify-bot/install.sh | bash
+AUTO_START=1 curl -fsSL https://raw.githubusercontent.com/Xynrin-111/Xynrinbot/main/install.sh | bash
 ```
 
 如果你想跳过交互并直接指定参数：
@@ -155,7 +154,7 @@ ADMIN_LOCAL_ONLY=true \
 AUTO_OPEN_ADMIN_UI=false \
 INSTALL_ONEBOT_CLIENT=none \
 INTERACTIVE_INSTALL=0 \
-curl -fsSL https://raw.githubusercontent.com/Xynrin-111/linux-tool/main/nonebot-group-verify-bot/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Xynrin-111/Xynrinbot/main/install.sh | bash
 ```
 
 说明：
@@ -185,7 +184,7 @@ bash scripts/update.sh
 如果你需要临时改更新来源：
 
 ```bash
-REPO_REF=main TOOL_SUBDIR=nonebot-group-verify-bot bash scripts/update.sh
+REPO_REF=main bash scripts/update.sh
 ```
 
 ## 服务器部署建议
