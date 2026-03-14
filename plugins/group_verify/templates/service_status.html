@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>服务状态</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 26px;
+      background:
+        radial-gradient(circle at top left, rgba(255, 214, 102, 0.20), transparent 28%),
+        radial-gradient(circle at bottom right, rgba(110, 231, 183, 0.24), transparent 26%),
+        linear-gradient(180deg, #fbf7ef 0%, #f6f0e4 100%);
+      color: #1f2937;
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    }
+    #service-status-card {
+      width: 1260px;
+      border-radius: 30px;
+      overflow: hidden;
+      background: #fffdf8;
+      border: 1px solid rgba(180, 146, 86, 0.16);
+      box-shadow: 0 24px 60px rgba(71, 55, 28, 0.14);
+    }
+    .hero {
+      padding: 28px 30px 22px;
+      background:
+        linear-gradient(135deg, rgba(252, 236, 212, 0.96), rgba(244, 226, 186, 0.92)),
+        linear-gradient(180deg, #fff9ed, #f8eed8);
+      border-bottom: 1px solid rgba(180, 146, 86, 0.18);
+    }
+    .hero-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      border-radius: 999px;
+      background: rgba(112, 87, 34, 0.08);
+      border: 1px solid rgba(112, 87, 34, 0.10);
+      font-size: 12px;
+      letter-spacing: 0.8px;
+      color: #7c5b1c;
+    }
+    h1 {
+      margin: 14px 0 8px;
+      font-size: 36px;
+      line-height: 1.15;
+      color: #2b2213;
+    }
+    .subtitle {
+      color: #6b5b3c;
+      font-size: 15px;
+      line-height: 1.8;
+    }
+    .status-pill {
+      min-width: 164px;
+      padding: 14px 18px;
+      border-radius: 22px;
+      text-align: center;
+      font-size: 15px;
+      font-weight: 800;
+      border: 1px solid rgba(0, 0, 0, 0.06);
+      background: rgba(255, 255, 255, 0.74);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+    }
+    .status-pill.online { color: #0f766e; }
+    .status-pill.offline { color: #b42318; }
+    .overview {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .overview-card {
+      padding: 16px 18px;
+      border-radius: 22px;
+      background: rgba(255, 251, 242, 0.92);
+      border: 1px solid rgba(180, 146, 86, 0.14);
+      box-shadow: 0 6px 18px rgba(99, 76, 35, 0.06);
+    }
+    .overview-card .label {
+      font-size: 12px;
+      color: #8a7447;
+      letter-spacing: 0.4px;
+    }
+    .overview-card .value {
+      margin-top: 8px;
+      font-size: 28px;
+      font-weight: 800;
+      color: #2c2414;
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    .body {
+      padding: 22px;
+      display: grid;
+      gap: 16px;
+    }
+    .top-layout {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+    }
+    .bottom-layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+    .panel {
+      padding: 20px;
+      border-radius: 24px;
+      background: #fffaf0;
+      border: 1px solid rgba(180, 146, 86, 0.14);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+    }
+    .panel h2 {
+      margin: 0 0 14px;
+      font-size: 20px;
+      color: #322714;
+    }
+    .panel-note {
+      margin: -4px 0 14px;
+      color: #907a4d;
+      font-size: 12px;
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .metric-card {
+      padding: 16px;
+      border-radius: 20px;
+      background: #fffefb;
+      border: 1px solid rgba(180, 146, 86, 0.12);
+    }
+    .metric-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: baseline;
+    }
+    .metric-head span {
+      font-size: 13px;
+      color: #8b7447;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .metric-head strong {
+      font-size: 24px;
+      color: #2c2414;
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    .meter {
+      margin-top: 12px;
+      height: 12px;
+      border-radius: 999px;
+      overflow: hidden;
+      background:
+        repeating-linear-gradient(
+          90deg,
+          rgba(99, 76, 35, 0.09) 0,
+          rgba(99, 76, 35, 0.09) 10px,
+          rgba(99, 76, 35, 0.04) 10px,
+          rgba(99, 76, 35, 0.04) 20px
+        );
+    }
+    .meter-fill {
+      height: 100%;
+      border-radius: inherit;
+    }
+    .meter-fill.good { background: linear-gradient(90deg, #10b981, #6ee7b7); }
+    .meter-fill.warn { background: linear-gradient(90deg, #f59e0b, #facc15); }
+    .meter-fill.danger { background: linear-gradient(90deg, #ef4444, #fb7185); }
+    .metric-foot {
+      margin-top: 10px;
+      color: #7a6640;
+      font-size: 12px;
+      line-height: 1.7;
+    }
+    .kv-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+    .kv-item {
+      min-height: 92px;
+      padding: 14px 16px;
+      border-radius: 18px;
+      background: #fffefb;
+      border: 1px solid rgba(180, 146, 86, 0.12);
+    }
+    .kv-item.full { grid-column: 1 / -1; }
+    .kv-item .key {
+      color: #8b7447;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .kv-item .value {
+      margin-top: 8px;
+      color: #2c2414;
+      font-size: 15px;
+      line-height: 1.7;
+      word-break: break-all;
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      overflow: hidden;
+      border-radius: 16px;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 10px;
+      border-bottom: 1px solid rgba(180, 146, 86, 0.12);
+    }
+    thead th {
+      background: rgba(244, 226, 186, 0.42);
+      color: #7c6538;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    tbody td {
+      color: #2c2414;
+      background: rgba(255, 254, 251, 0.86);
+    }
+    .table-code {
+      font-family: "JetBrains Mono", "Consolas", monospace;
+    }
+    .footer {
+      text-align: right;
+      color: #957b49;
+      font-size: 12px;
+      letter-spacing: 0.4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="service-status-card">
+    <div class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="badge">GROUP VERIFY MONITOR</div>
+          <h1>入群验证服务状态</h1>
+          <div class="subtitle">
+            启动时间：{{started_at}}<br />
+            已运行：{{uptime_text}} | 模板预设：{{verify_template_preset}} | Playwright：{{playwright_browser}}
+          </div>
+        </div>
+        <div class="status-pill {{bot_status_class}}">机器人 {{bot_status}}</div>
+      </div>
+      <div class="overview">
+        <div class="overview-card"><div class="label">目标群</div><div class="value">{{target_group_count}}</div></div>
+        <div class="overview-card"><div class="label">超级管理员</div><div class="value">{{superuser_count}}</div></div>
+        <div class="overview-card"><div class="label">待验证</div><div class="value">{{pending_count}}</div></div>
+        <div class="overview-card"><div class="label">已通过</div><div class="value">{{passed_count}}</div></div>
+        <div class="overview-card"><div class="label">已踢出</div><div class="value">{{kicked_count}}</div></div>
+      </div>
+    </div>
+
+    <div class="body">
+      <div class="top-layout">
+        <div class="panel">
+          <h2>系统资源</h2>
+          <div class="panel-note">接近 btop 的简化面板，重点看趋势和异常占用</div>
+          <div class="metric-grid">{{resource_cards}}</div>
+        </div>
+
+        <div class="panel">
+          <h2>服务概览</h2>
+          <div class="kv-grid">
+            <div class="kv-item"><div class="key">CPU / Load</div><div class="value">{{cpu_percent}} | {{load_average}}</div></div>
+            <div class="kv-item"><div class="key">内存</div><div class="value">{{memory_percent}} | {{memory_detail}}</div></div>
+            <div class="kv-item"><div class="key">磁盘</div><div class="value">{{disk_percent}} | {{disk_detail}}</div></div>
+            <div class="kv-item"><div class="key">GPU</div><div class="value">{{gpu_summary}}</div></div>
+            <div class="kv-item"><div class="key">网络累计</div><div class="value">{{network_detail}}</div></div>
+            <div class="kv-item"><div class="key">系统开机</div><div class="value">{{boot_time}}</div></div>
+            <div class="kv-item"><div class="key">内存任务</div><div class="value">{{task_count}}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bottom-layout">
+        <div class="panel">
+          <h2>运行参数</h2>
+          <div class="kv-grid">
+            <div class="kv-item"><div class="key">主客户端</div><div class="value">{{primary_client_name}}</div></div>
+            <div class="kv-item"><div class="key">启动方式</div><div class="value">{{client_launchable}}</div></div>
+            <div class="kv-item"><div class="key">二维码更新时间</div><div class="value">{{latest_qr_mtime}}</div></div>
+            <div class="kv-item"><div class="key">模板预设</div><div class="value">{{verify_template_preset}}</div></div>
+            <div class="kv-item full"><div class="key">客户端目录</div><div class="value">{{primary_client_root}}</div></div>
+            <div class="kv-item full"><div class="key">二维码文件</div><div class="value">{{latest_qr_path}}</div></div>
+          </div>
+
+          <h2 style="margin-top: 18px;">机器人进程</h2>
+          <table>
+            <tbody>{{process_rows}}</tbody>
+          </table>
+        </div>
+
+      </div>
+
+      <div class="footer">服务状态与验证记录命令已分离，状态图只保留运行态信息</div>
+    </div>
+  </div>
+</body>
+</html>

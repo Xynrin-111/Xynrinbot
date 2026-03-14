@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>入群验证</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 18px;
+      background:
+        radial-gradient(circle at top left, rgba(76, 201, 240, 0.45), transparent 34%),
+        radial-gradient(circle at bottom right, rgba(114, 9, 183, 0.38), transparent 32%),
+        linear-gradient(135deg, #06131f 0%, #10273d 52%, #091827 100%);
+      font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+      color: #eff7ff;
+    }
+
+    #verify-card {
+      width: 620px;
+      min-height: 400px;
+      padding: 30px 34px 28px;
+      position: relative;
+      overflow: hidden;
+      border-radius: 26px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: linear-gradient(160deg, rgba(255, 255, 255, 0.22), rgba(255, 255, 255, 0.08));
+      box-shadow: 0 28px 60px rgba(0, 0, 0, 0.34);
+      backdrop-filter: blur(18px);
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    #verify-card::before,
+    #verify-card::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      filter: blur(8px);
+      opacity: 0.9;
+    }
+
+    #verify-card::before {
+      width: 200px;
+      height: 200px;
+      top: -70px;
+      right: -40px;
+      background: radial-gradient(circle, rgba(90, 196, 255, 0.78), rgba(90, 196, 255, 0));
+    }
+
+    #verify-card::after {
+      width: 180px;
+      height: 180px;
+      left: -40px;
+      bottom: -70px;
+      background: radial-gradient(circle, rgba(204, 102, 255, 0.72), rgba(204, 102, 255, 0));
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: flex-start;
+      position: relative;
+      z-index: 1;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      font-size: 13px;
+      color: rgba(239, 247, 255, 0.88);
+    }
+
+    .badge::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #8ef6ff;
+      box-shadow: 0 0 12px rgba(142, 246, 255, 0.9);
+    }
+
+    .header {
+      margin-top: 18px;
+      font-size: 30px;
+      font-weight: 700;
+      line-height: 1.35;
+      letter-spacing: 1px;
+    }
+
+    .meta {
+      margin-top: 16px;
+      color: rgba(228, 239, 250, 0.86);
+      font-size: 15px;
+      line-height: 1.9;
+    }
+
+    .code-box {
+      position: relative;
+      margin-top: 22px;
+      border-radius: 24px;
+      padding: 26px 24px;
+      background: linear-gradient(135deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.06));
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      overflow: hidden;
+    }
+
+    .code-label {
+      font-size: 13px;
+      letter-spacing: 2px;
+      color: rgba(219, 236, 255, 0.72);
+      text-transform: uppercase;
+    }
+
+    .code-text {
+      margin-top: 12px;
+      font-size: 70px;
+      font-weight: 800;
+      letter-spacing: 12px;
+      text-align: center;
+      color: #ffffff;
+      text-shadow: 0 10px 30px rgba(24, 112, 255, 0.35);
+      padding-left: 12px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .gridline,
+    .gridline::before,
+    .gridline::after {
+      position: absolute;
+      inset: 0;
+      content: "";
+    }
+
+    .gridline {
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.06) 1px, transparent 1px) 0 0 / 56px 56px,
+        linear-gradient(rgba(255, 255, 255, 0.06) 1px, transparent 1px) 0 0 / 56px 56px;
+      opacity: 0.5;
+    }
+
+    .gridline::before {
+      background: linear-gradient(120deg, transparent 20%, rgba(130, 220, 255, 0.2), transparent 80%);
+      transform: translateX(-25%);
+    }
+
+    .gridline::after {
+      background: linear-gradient(300deg, transparent 30%, rgba(255, 255, 255, 0.12), transparent 75%);
+      transform: translateX(18%);
+    }
+
+    .footer {
+      margin-top: 22px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: center;
+      position: relative;
+      z-index: 1;
+    }
+
+    .footer-text {
+      font-size: 15px;
+      line-height: 1.8;
+      color: rgba(232, 242, 252, 0.82);
+    }
+
+    .footer-flag {
+      min-width: 148px;
+      padding: 10px 14px;
+      border-radius: 16px;
+      text-align: center;
+      background: rgba(7, 16, 27, 0.34);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      font-size: 14px;
+      line-height: 1.7;
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div id="verify-card">
+    <div>
+      <div class="topbar">
+        <div class="badge">GROUP VERIFY ACCESS</div>
+        <div class="badge">EXPIRES {{expire_time}}</div>
+      </div>
+      <div class="header">请在 5 分钟内发送验证码完成入群验证</div>
+      <div class="meta">
+        用户 QQ：{{user_qq}}<br />
+        群名称：{{group_name}}
+      </div>
+
+      <div class="code-box">
+        <div class="gridline"></div>
+        <div class="code-label">Verification Code</div>
+        <div class="code-text">{{verify_code}}</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div class="footer-text">
+        超时未验证将被移出群聊，请勿转发验证码。<br />
+        请直接在群内发送验证码文本。
+      </div>
+      <div class="footer-flag">仅限当前新成员使用</div>
+    </div>
+  </div>
+</body>
+</html>

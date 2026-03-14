@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nonebot-group-verify-bot"
+version = "0.1.0"
+description = "基于 NoneBot2 的 QQ 群新人入群验证机器人示例项目"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "nonebot2[fastapi]>=2.4.3",
+    "nonebot-adapter-onebot>=2.4.6",
+    "SQLAlchemy>=2.0.32",
+    "aiosqlite>=0.20.0",
+    "python-multipart>=0.0.9",
+    "playwright>=1.52.0",
+    "greenlet>=3.0.3",
+    "psutil>=5.9.8",
+]
+
+[tool.nonebot]
+plugins = ["plugins.group_verify"]
+plugin_dirs = ["plugins"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["plugins", "plugins.*"]
+
+[tool.setuptools.package-data]
+"plugins.group_verify" = ["templates/*.html"]
