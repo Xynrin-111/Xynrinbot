@@ -4,6 +4,8 @@
 
 目标是把“新人进群发验证码、超时或输错自动踢出、网页可视化管理”这套流程做成一个可直接部署的完整项目，而不是只给插件片段。
 
+当前项目默认把 OneBot 客户端视为外部组件，以降低 `NapCat / LinuxQQ / OneBot` 上游更新对本项目的直接冲击。跨平台策略见 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md)。
+
 ## 功能特性
 
 - 新人入群后立即发送验证码图片和提示文案。
@@ -14,8 +16,12 @@
 - 重复入群会重置验证码和状态，旧验证码立刻失效。
 - 机器人重启后自动恢复未过期的待验证任务。
 - 提供本地网页管理台，可直接配置目标群、超级管理员、模板和 OneBot 客户端。
+- 管理台已拆成概览 / 配置 / 模板库 / 系统 / 日志多入口，而不是单页堆叠。
+- 支持 SMTP 配置与测试邮件发送。
+- 支持统一代理配置，`pip`、Playwright 和 OneBot 下载链路可共享同一套代理环境变量。
 - 支持服务状态图，显示 CPU / 内存 / 磁盘 / GPU / 进程信息。
 - 验证记录已独立为单独命令，不再挤占状态图版面。
+- 验证码模板支持模板库多版本保存与切换，不再局限于单个自定义覆盖文件。
 
 ## 适合什么环境
 
@@ -31,7 +37,8 @@
 
 - 纯 NoneBot 服务端逻辑可以跑在服务器。
 - QQ 客户端这一层能不能稳定跑，取决于你的 OneBot 客户端方案。
-- 本项目当前默认走 `NapCat`，并且已经带了自动安装脚本。
+- 本项目默认把 OneBot 客户端视为外部组件，不再强制绑定 `NapCat`。
+- 如果你确认当前机器适合跑 `NapCat / LinuxQQ`，仍然可以显式启用项目内安装脚本。
 
 ## 已带脚本
 
@@ -40,15 +47,15 @@
 - `install.sh`
   面向在线安装。支持交互式选择 `desktop / server` 模式，并可在安装时直接写入 WebUI 地址、端口、管理台访问范围和 OneBot 安装策略。
 - `scripts/run.sh`
-  推荐入口。会自动补齐虚拟环境、Python 依赖、Playwright、`.env`，并默认安装 `NapCat`。
+  推荐入口。会自动补齐 Python 依赖、Playwright、`config/appsettings.json`，默认使用项目本地依赖目录 `.runtime/`，且默认不自动安装 OneBot 客户端。
 - `scripts/bootstrap.sh`
   只做初始化，不启动服务。
 - `scripts/start.sh`
   只启动，不执行初始化。
 - `scripts/install_onebot.sh`
-  安装 OneBot 客户端。默认安装 `NapCat`，也支持跳过。
+  安装 OneBot 客户端。默认跳过；如果显式设置 `ONEBOT_CLIENT=napcat`，才会安装 `NapCat`。
 - `scripts/update.sh`
-  在线更新当前项目代码，默认保留 `.env`、`.venv`、`data/`、`third_party/` 和 `.install-meta`，适合后续重复升级。
+  在线更新当前项目代码，默认保留 `config/appsettings.json`、`.env`、`.venv`、`.runtime/`、`data/`、`third_party/` 和 `.install-meta`，适合后续重复升级。
 
 ## 快速开始
 
@@ -72,15 +79,15 @@ bash install.sh --local-bootstrap
 - WebUI 端口
 - 管理台是否仅允许本机访问
 - 启动后是否自动打开管理台
-- 是否自动安装 `NapCat`
+- 是否自动安装 OneBot 客户端
 
 这一步会自动：
 
-- 创建 `.venv`
+- 创建项目本地依赖目录 `.runtime/`（可用 `PYTHON_RUNTIME_MODE=venv` 切回 `.venv`）
 - 安装项目依赖
 - 安装 Playwright Chromium
-- 复制 `.env.example` 为 `.env`
-- 按你的选择安装 `NapCat` 或跳过
+- 初始化 `config/appsettings.json`
+- 按你的选择安装 OneBot 客户端或跳过
 
 如果你不想交互，也可以直接用环境变量：
 
@@ -99,6 +106,12 @@ bash install.sh --local-bootstrap
 
 ```bash
 ONEBOT_CLIENT=none bash scripts/run.sh --bootstrap-only
+```
+
+如果你更想保留旧的 `.venv` 方式：
+
+```bash
+PYTHON_RUNTIME_MODE=venv bash scripts/run.sh --bootstrap-only
 ```
 
 ### 3. 启动机器人
@@ -159,7 +172,7 @@ curl -fsSL https://raw.githubusercontent.com/Xynrin-111/Xynrinbot/main/install.s
 
 说明：
 
-- `desktop` 模式默认本机监听 `127.0.0.1:8080`，自动打开管理台，并默认安装 `NapCat`
+- `desktop` 模式默认本机监听 `127.0.0.1:8080`，自动打开管理台，默认不自动安装 OneBot 客户端
 - `server` 模式默认本机监听 `127.0.0.1:8080`，不自动打开管理台，并默认跳过 OneBot 安装
 - 如果你把 `APP_HOST` 设为 `0.0.0.0` 且 `ADMIN_LOCAL_ONLY=false`，管理台会直接暴露到网络，请自行做好安全控制
 
@@ -177,6 +190,7 @@ bash scripts/update.sh
 - 替换项目代码
 - 保留 `.env`
 - 保留 `.venv`
+- 保留 `.runtime`
 - 保留 `data/`
 - 保留 `third_party/`
 - 重新同步 Python 依赖
@@ -202,7 +216,8 @@ REPO_REF=main bash scripts/update.sh
 
 注意：
 
-- 如果管理台默认只允许本机访问，需要通过 SSH 隧道、反向代理或临时调整 `VERIFY_ADMIN_LOCAL_ONLY=false` 来访问。
+- 优先使用 SSH 隧道或内网 ACL 访问管理台；`VERIFY_ADMIN_LOCAL_ONLY=true` 时，管理台只允许本机直连，不支持经反代访问。
+- 如果你确实要设置 `VERIFY_ADMIN_LOCAL_ONLY=false`，必须同时配置 `VERIFY_ADMIN_USERNAME` 和 `VERIFY_ADMIN_PASSWORD`。
 - 机器人必须是目标群管理员，否则无法踢人。
 
 ### 方案 B：服务器跑 NoneBot，另一台机器跑 OneBot 客户端
@@ -232,68 +247,90 @@ sudo apt install -y python3 python3-venv curl
 
 ## 手动安装
 
+项目当前以 `config/appsettings.json` 为主配置源，`.env` 仅作为兼容导出文件存在。
+
+其中新增了两组常用配置：
+
+- `smtp`
+  用于管理台测试发信与后续邮件能力接入。
+- `proxy`
+  用于统一注入 `HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY`，让脚本安装与下载链路保持一致。
+
 如果你不想用脚本，可以手动部署。
 
-### 1. 创建虚拟环境
+### 1. 创建项目本地依赖目录
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+mkdir -p .runtime/site-packages .runtime/playwright
 ```
 
 ### 2. 安装依赖
 
 ```bash
-pip install -U pip
-pip install -e .
+python3 -m pip install -U --target .runtime/site-packages .
 ```
 
 ### 3. 安装 Playwright 浏览器
 
 ```bash
-playwright install chromium
+PYTHONPATH=.runtime/site-packages PLAYWRIGHT_BROWSERS_PATH=.runtime/playwright \
+python3 -m playwright install chromium
 ```
 
 如果服务器缺系统依赖：
 
 ```bash
-playwright install-deps chromium
+PYTHONPATH=.runtime/site-packages PLAYWRIGHT_BROWSERS_PATH=.runtime/playwright \
+python3 -m playwright install-deps chromium
 ```
 
-### 4. 复制配置文件
+### 4. 初始化项目配置
 
 ```bash
-cp .env.example .env
+python3 scripts/projectctl.py init
 ```
 
 ### 5. 启动
 
 ```bash
-python bot.py
+bash scripts/run.sh --start-only
 ```
 
 ## 关键配置
 
 最重要的配置项通常只有这些：
 
-```env
-HOST=127.0.0.1
-PORT=8080
-ONEBOT_ACCESS_TOKEN=
-SUPERUSERS=["123456789"]
-VERIFY_TARGET_GROUPS=123456789,987654321
-VERIFY_TIMEOUT_MINUTES=5
-VERIFY_MAX_ERROR_TIMES=3
-VERIFY_PLAYWRIGHT_BROWSER=chromium
-VERIFY_ADMIN_LOCAL_ONLY=true
+```json
+{
+  "app": {
+    "host": "127.0.0.1",
+    "port": 8080
+  },
+  "admin": {
+    "local_only": true,
+    "username": "admin",
+    "password": "请改成强密码"
+  },
+  "onebot": {
+    "access_token": ""
+  },
+  "verify": {
+    "superusers": [123456789],
+    "target_groups": [123456789, 987654321],
+    "timeout_minutes": 5,
+    "max_error_times": 3,
+    "playwright_browser": "chromium"
+  }
+}
 ```
 
 说明：
 
-- `SUPERUSERS` 是超级管理员 QQ 列表。
-- `VERIFY_TARGET_GROUPS` 是启用验证的群号列表。
-- `ONEBOT_ACCESS_TOKEN` 如果 OneBot 端配置了，这里必须一致。
-- `VERIFY_ADMIN_LOCAL_ONLY=true` 时，管理台只允许本机访问。
+- `verify.superusers` 是超级管理员 QQ 列表。
+- `verify.target_groups` 是启用验证的群号列表。
+- `onebot.access_token` 如果 OneBot 端配置了，这里必须一致。
+- `admin.local_only=true` 时，管理台只允许本机直连访问。
+- 如果 `admin.local_only=false`，必须配置 `admin.username` 和 `admin.password`，并且建议再加内网 ACL 或 SSH 隧道。
 
 ## OneBot 配置示例
 
@@ -311,7 +348,7 @@ OneBot:
 
 要求：
 
-- `Host` / `Port` 要和 `.env` 一致。
+- `Host` / `Port` 要和 `config/appsettings.json` 中的 `app.host` / `app.port` 一致。
 - 如果有 `AccessToken`，必须与 `ONEBOT_ACCESS_TOKEN` 一致。
 - 机器人账号必须已经登录成功并加入目标群。
 - 机器人必须有群管理权限。
@@ -427,8 +464,7 @@ bash scripts/run.sh
 先执行：
 
 ```bash
-playwright install chromium
-playwright install-deps chromium
+bash scripts/run.sh --bootstrap-only
 ```
 
 ### 4. 为什么到时间了没踢人？
@@ -443,9 +479,9 @@ playwright install-deps chromium
 
 常见原因：
 
-- 发命令的人不在 `SUPERUSERS`；
-- 群号不在 `VERIFY_TARGET_GROUPS`；
-- 修改 `.env` 后没重启；
+- 发命令的人不在 `verify.superusers`；
+- 群号不在 `verify.target_groups`；
+- 修改 `config/appsettings.json` 后没重启；
 - 纯文本发送了 `帮助`，但这个命令只支持 `@机器人`。
 
 ## 开源发布建议
@@ -454,8 +490,8 @@ playwright install-deps chromium
 
 - 增加仓库截图：管理台首页、状态图、验证码图各一张。
 - 增加 `LICENSE`。
-- 把 `.env.example` 保持为可直接复制的最小示例。
-- 在 Releases 或 README 里说明当前默认支持的 OneBot 客户端是 `NapCat`。
+- 把 `config/appsettings.json.example` 保持为可直接复制的最小示例。
+- 在 Releases 或 README 里说明当前默认支持的 OneBot 接入方式是 `external`。
 - 如果后续支持 Docker，再单独补一个 `Docker 部署` 章节。
 
 另外，发布到 GitHub 时不要带上本地运行痕迹：
@@ -481,3 +517,33 @@ playwright install-deps chromium
 - OneBot: https://github.com/botuniverse/onebot
 - NoneBot OneBot Adapter: https://github.com/nonebot/adapter-onebot
 - Playwright Python: https://playwright.dev/python/
+
+## 免责声明
+
+**⚠️ 使用本项目即表示您已阅读并同意以下条款：**
+
+1. **仅供学习交流**：本项目仅供个人学习研究交流使用，禁止用于任何商业目的。
+
+2. **无任何担保**：本项目按"原样"提供，不提供任何明示或暗示的保证，包括但不限于：
+   - 稳定性保证
+   - 安全性保证
+   - 适用性保证
+
+3. **使用风险自担**：您使用本项目所产生的一切风险（包括但不限于）：
+   - QQ 账号被封禁
+   - 群聊功能异常
+   - 数据丢失
+   - 其他任何损失
+
+   **均由您自行承担，开发者不承担任何责任。**
+
+4. **账号安全**：
+   - 请使用小号进行测试
+   - 建议开启 QQ 设备锁
+   - 勿在生产环境直接使用未经验证的配置
+
+5. **技术支持**：本项目不提供任何形式的技术支持文档或保证，开发者有权随时停止维护。
+
+6. **遵守平台规则**：使用本项目时，请确保遵守腾讯服务条款及相关法律法规，因违规使用导致的任何后果由您自行负责。
+
+**如果您不同意以上条款，请立即停止使用本项目。**

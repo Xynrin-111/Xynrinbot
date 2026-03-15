@@ -1,0 +1,50 @@
+{
+  "app": {
+    "host": "127.0.0.1",
+    "port": 8080,
+    "driver": "~fastapi",
+    "log_level": "INFO",
+    "deploy_profile": "desktop",
+    "platform": "auto"
+  },
+  "admin": {
+    "path": "/admin",
+    "local_only": true,
+    "username": "admin",
+    "password": "",
+    "auto_open": false
+  },
+  "onebot": {
+    "provider": "external",
+    "access_token": "",
+    "lagrange_qr_dir": "",
+    "install_client": "none"
+  },
+  "smtp": {
+    "host": "",
+    "port": 465,
+    "username": "",
+    "password": "",
+    "from_email": "",
+    "to_email": "",
+    "use_tls": false,
+    "use_ssl": true
+  },
+  "proxy": {
+    "http_proxy": "",
+    "https_proxy": "",
+    "all_proxy": "",
+    "no_proxy": ""
+  },
+  "verify": {
+    "target_groups": [],
+    "superusers": [],
+    "timeout_minutes": 5,
+    "max_error_times": 3,
+    "playwright_browser": "chromium",
+    "image_retry_times": 2
+  },
+  "runtime": {
+    "python_mode": "project"
+  }
+}

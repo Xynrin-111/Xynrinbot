@@ -5,6 +5,9 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 META_FILE="$PROJECT_DIR/.install-meta"
 
+source "$PROJECT_DIR/scripts/lib/network.sh"
+apply_network_proxy_env
+
 REPO_SLUG_DEFAULT="Xynrin-111/Xynrinbot"
 REPO_REF_DEFAULT="main"
 TOOL_SUBDIR_DEFAULT=""
@@ -12,7 +15,8 @@ TOOL_SUBDIR_DEFAULT=""
 REPO_SLUG="${REPO_SLUG:-}"
 REPO_REF="${REPO_REF:-}"
 TOOL_SUBDIR="${TOOL_SUBDIR:-}"
-PRESERVE_ITEMS=(".env" ".venv" "data" "third_party" ".install-meta" ".git")
+PRESERVE_ITEMS=("config/appsettings.json" ".env" ".venv" ".runtime" "data" "third_party" ".install-meta" ".git")
+PYTHON_RUNTIME_MODE="${PYTHON_RUNTIME_MODE:-}"
 
 download_file() {
   local url="$1"
@@ -45,11 +49,13 @@ load_metadata() {
     REPO_SLUG="${REPO_SLUG:-$(awk -F= '$1=="REPO_SLUG"{print substr($0, index($0, "=")+1); exit}' "$META_FILE")}"
     REPO_REF="${REPO_REF:-$(awk -F= '$1=="REPO_REF"{print substr($0, index($0, "=")+1); exit}' "$META_FILE")}"
     TOOL_SUBDIR="${TOOL_SUBDIR:-$(awk -F= '$1=="TOOL_SUBDIR"{print substr($0, index($0, "=")+1); exit}' "$META_FILE")}"
+    PYTHON_RUNTIME_MODE="${PYTHON_RUNTIME_MODE:-$(awk -F= '$1=="PYTHON_RUNTIME_MODE"{print substr($0, index($0, "=")+1); exit}' "$META_FILE")}"
   fi
 
   REPO_SLUG="${REPO_SLUG:-$REPO_SLUG_DEFAULT}"
   REPO_REF="${REPO_REF:-$REPO_REF_DEFAULT}"
   TOOL_SUBDIR="${TOOL_SUBDIR:-$TOOL_SUBDIR_DEFAULT}"
+  PYTHON_RUNTIME_MODE="${PYTHON_RUNTIME_MODE:-project}"
 }
 
 preserve_runtime_state() {
@@ -59,17 +65,9 @@ preserve_runtime_state() {
   mkdir -p "$preserve_dir"
   for item in "${PRESERVE_ITEMS[@]}"; do
     if [ -e "$PROJECT_DIR/$item" ]; then
+      mkdir -p "$(dirname "$preserve_dir/$item")"
       mv "$PROJECT_DIR/$item" "$preserve_dir/$item"
     fi
-  done
-}
-
-clear_project_dir() {
-  local path
-
-  for path in "$PROJECT_DIR"/.[!.]* "$PROJECT_DIR"/..?* "$PROJECT_DIR"/*; do
-    [ -e "$path" ] || continue
-    rm -rf "$path"
   done
 }
 
@@ -79,9 +77,35 @@ restore_runtime_state() {
 
   for item in "${PRESERVE_ITEMS[@]}"; do
     if [ -e "$preserve_dir/$item" ]; then
+      mkdir -p "$(dirname "$PROJECT_DIR/$item")"
       rm -rf "$PROJECT_DIR/$item"
       mv "$preserve_dir/$item" "$PROJECT_DIR/$item"
     fi
+  done
+}
+
+move_project_to_backup() {
+  local backup_dir="$1"
+  local path
+
+  mkdir -p "$backup_dir"
+  for path in "$PROJECT_DIR"/.[!.]* "$PROJECT_DIR"/..?* "$PROJECT_DIR"/*; do
+    [ -e "$path" ] || continue
+    mv "$path" "$backup_dir/"
+  done
+}
+
+restore_project_backup() {
+  local backup_dir="$1"
+  local path
+
+  for path in "$PROJECT_DIR"/.[!.]* "$PROJECT_DIR"/..?* "$PROJECT_DIR"/*; do
+    [ -e "$path" ] || continue
+    rm -rf "$path"
+  done
+  for path in "$backup_dir"/.[!.]* "$backup_dir"/..?* "$backup_dir"/*; do
+    [ -e "$path" ] || continue
+    mv "$path" "$PROJECT_DIR/"
   done
 }
 
@@ -91,6 +115,8 @@ main() {
   local extract_root
   local source_dir
   local preserve_dir
+  local backup_dir
+  local staged_dir
 
   require_command tar
   require_command mktemp
@@ -100,6 +126,8 @@ main() {
   archive_url="https://codeload.github.com/$REPO_SLUG/tar.gz/refs/heads/$REPO_REF"
   tmp_dir="$(mktemp -d)"
   preserve_dir="$tmp_dir/preserve"
+  backup_dir="$tmp_dir/backup"
+  staged_dir="$tmp_dir/staged"
 
   echo "更新项目..."
   echo "仓库：$REPO_SLUG"
@@ -129,16 +157,30 @@ main() {
     exit 1
   fi
 
+  mkdir -p "$staged_dir"
+  cp -r "$source_dir"/. "$staged_dir"
   preserve_runtime_state "$preserve_dir"
-  clear_project_dir
-  cp -r "$source_dir"/. "$PROJECT_DIR"
+  move_project_to_backup "$backup_dir"
+  if ! cp -r "$staged_dir"/. "$PROJECT_DIR"; then
+    echo "错误：复制新代码失败，正在回滚旧版本。"
+    restore_project_backup "$backup_dir"
+    restore_runtime_state "$preserve_dir"
+    rm -rf "$tmp_dir"
+    exit 1
+  fi
   restore_runtime_state "$preserve_dir"
 
   echo "同步 Python 依赖并保留现有 OneBot 运行目录..."
-  (
+  if ! (
     cd "$PROJECT_DIR"
-    SKIP_ONEBOT_INSTALL=1 bash scripts/run.sh --bootstrap-only
-  )
+    SKIP_ONEBOT_INSTALL=1 PYTHON_RUNTIME_MODE="$PYTHON_RUNTIME_MODE" bash scripts/run.sh --bootstrap-only
+  ); then
+    echo "错误：更新后的初始化失败，正在回滚旧版本。"
+    restore_project_backup "$backup_dir"
+    restore_runtime_state "$preserve_dir"
+    rm -rf "$tmp_dir"
+    exit 1
+  fi
 
   rm -rf "$tmp_dir"
 

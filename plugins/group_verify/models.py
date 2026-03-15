@@ -21,6 +21,7 @@ class VerifyStatus:
     PASSED = "已通过"
     KICKED = "已踢出"
     TIMEOUT_KICKED = "已超时踢出"
+    CANCELLED = "已取消"
 
 
 class GroupConfig(Base):

@@ -4,7 +4,10 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_ROOT="${ONEBOT_INSTALL_DIR:-$PROJECT_DIR/third_party/onebot}"
-CLIENT_NAME="${ONEBOT_CLIENT:-napcat}"
+CLIENT_NAME="${ONEBOT_CLIENT:-none}"
+
+source "$PROJECT_DIR/scripts/lib/network.sh"
+apply_network_proxy_env
 
 mkdir -p "$INSTALL_ROOT"
 
@@ -53,36 +56,7 @@ is_arch_like() {
 
 patch_env_qr_dir() {
   local target_dir="$1"
-  local env_file="$PROJECT_DIR/.env"
-
-  if [ ! -f "$env_file" ]; then
-    return
-  fi
-
-  if grep -q '^VERIFY_LAGRANGE_QR_DIR=' "$env_file"; then
-    python3 - "$env_file" "$target_dir" <<'PY'
-from pathlib import Path
-import sys
-
-env_path = Path(sys.argv[1])
-target = sys.argv[2]
-lines = env_path.read_text(encoding="utf-8").splitlines()
-result = []
-updated = False
-for line in lines:
-    if line.startswith("VERIFY_LAGRANGE_QR_DIR="):
-        current = line.split("=", 1)[1].strip()
-        if not current:
-            line = f"VERIFY_LAGRANGE_QR_DIR={target}"
-        updated = True
-    result.append(line)
-if not updated:
-    result.append(f"VERIFY_LAGRANGE_QR_DIR={target}")
-env_path.write_text("\n".join(result) + "\n", encoding="utf-8")
-PY
-  else
-    printf '\nVERIFY_LAGRANGE_QR_DIR=%s\n' "$target_dir" >> "$env_file"
-  fi
+  python3 "$PROJECT_DIR/scripts/projectctl.py" set onebot.lagrange_qr_dir "$target_dir" >/dev/null
 }
 
 install_lagrange() {

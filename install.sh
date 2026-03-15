@@ -18,6 +18,9 @@ APP_PORT="${APP_PORT:-}"
 ADMIN_LOCAL_ONLY="${ADMIN_LOCAL_ONLY:-}"
 AUTO_OPEN_ADMIN_UI="${AUTO_OPEN_ADMIN_UI:-}"
 INSTALL_ONEBOT_CLIENT="${INSTALL_ONEBOT_CLIENT:-}"
+VERIFY_ADMIN_PASSWORD="${VERIFY_ADMIN_PASSWORD:-}"
+VERIFY_ADMIN_USERNAME="${VERIFY_ADMIN_USERNAME:-admin}"
+PYTHON_RUNTIME_MODE="${PYTHON_RUNTIME_MODE:-project}"
 INTERACTIVE_INSTALL="${INTERACTIVE_INSTALL:-auto}"
 
 download_file() {
@@ -165,7 +168,7 @@ apply_profile_defaults() {
       APP_PORT="${APP_PORT:-8080}"
       ADMIN_LOCAL_ONLY="${ADMIN_LOCAL_ONLY:-true}"
       AUTO_OPEN_ADMIN_UI="${AUTO_OPEN_ADMIN_UI:-true}"
-      INSTALL_ONEBOT_CLIENT="${INSTALL_ONEBOT_CLIENT:-napcat}"
+      INSTALL_ONEBOT_CLIENT="${INSTALL_ONEBOT_CLIENT:-none}"
       ;;
     server)
       APP_HOST="${APP_HOST:-127.0.0.1}"
@@ -200,7 +203,15 @@ collect_install_preferences() {
     done
     ADMIN_LOCAL_ONLY="$(prompt_bool "管理台是否仅允许本机访问" "$ADMIN_LOCAL_ONLY")"
     AUTO_OPEN_ADMIN_UI="$(prompt_bool "启动后是否自动打开本地管理台" "$AUTO_OPEN_ADMIN_UI")"
-    INSTALL_ONEBOT_CLIENT="$(prompt_choice "是否自动安装 OneBot 客户端" "$INSTALL_ONEBOT_CLIENT" "napcat" "none")"
+    INSTALL_ONEBOT_CLIENT="$(prompt_choice "是否自动安装 OneBot 客户端" "$INSTALL_ONEBOT_CLIENT" "none" "napcat")"
+    if [ "$ADMIN_LOCAL_ONLY" = "false" ]; then
+      while [ -z "$VERIFY_ADMIN_PASSWORD" ]; do
+        VERIFY_ADMIN_PASSWORD="$(prompt_text "管理台对外开放时必须设置访问密码" "$VERIFY_ADMIN_PASSWORD")"
+        if [ -z "$VERIFY_ADMIN_PASSWORD" ]; then
+          echo "管理台暴露到网络时必须配置密码。"
+        fi
+      done
+    fi
 
     if [ "$INSTALL_PROFILE" = "server" ] && [ "$APP_HOST" = "0.0.0.0" ] && [ "$ADMIN_LOCAL_ONLY" = "false" ]; then
       echo "警告：当前配置会把管理台直接暴露到外网。更安全的做法是保留本机访问，再走 SSH 隧道或反向代理。"
@@ -212,6 +223,10 @@ collect_install_preferences() {
 
   if ! is_valid_port "$APP_PORT"; then
     echo "错误：APP_PORT 必须是 1 到 65535 的整数。"
+    exit 1
+  fi
+  if [ "$ADMIN_LOCAL_ONLY" = "false" ] && [ -z "$VERIFY_ADMIN_PASSWORD" ]; then
+    echo "错误：管理台允许非本机访问时，必须提供 VERIFY_ADMIN_PASSWORD。"
     exit 1
   fi
 }
@@ -228,51 +243,26 @@ APP_PORT=$APP_PORT
 ADMIN_LOCAL_ONLY=$ADMIN_LOCAL_ONLY
 AUTO_OPEN_ADMIN_UI=$AUTO_OPEN_ADMIN_UI
 INSTALL_ONEBOT_CLIENT=$INSTALL_ONEBOT_CLIENT
+PYTHON_RUNTIME_MODE=$PYTHON_RUNTIME_MODE
 EOF
 }
 
 configure_project_env() {
   local target_dir="$1"
-  local env_file="$target_dir/.env"
-
-  if [ ! -f "$env_file" ]; then
-    return
-  fi
-
-  python3 - "$env_file" "$APP_HOST" "$APP_PORT" "$ADMIN_LOCAL_ONLY" "$AUTO_OPEN_ADMIN_UI" <<'PY'
-from pathlib import Path
-import sys
-
-env_path = Path(sys.argv[1])
-updates = {
-    "HOST": sys.argv[2],
-    "PORT": sys.argv[3],
-    "VERIFY_ADMIN_LOCAL_ONLY": sys.argv[4],
-    "VERIFY_AUTO_OPEN_ADMIN": sys.argv[5],
-}
-
-lines = env_path.read_text(encoding="utf-8").splitlines()
-seen: set[str] = set()
-result: list[str] = []
-for line in lines:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or "=" not in line:
-        result.append(line)
-        continue
-    key, _value = line.split("=", 1)
-    key = key.strip()
-    if key in updates:
-        result.append(f"{key}={updates[key]}")
-        seen.add(key)
-    else:
-        result.append(line)
-
-for key, value in updates.items():
-    if key not in seen:
-        result.append(f"{key}={value}")
-
-env_path.write_text("\n".join(result) + "\n", encoding="utf-8")
-PY
+  (
+    cd "$target_dir"
+    python3 scripts/projectctl.py init >/dev/null
+    python3 scripts/projectctl.py set app.deploy_profile "$INSTALL_PROFILE" >/dev/null
+    python3 scripts/projectctl.py set app.host "$APP_HOST" >/dev/null
+    python3 scripts/projectctl.py set app.port "$APP_PORT" >/dev/null
+    python3 scripts/projectctl.py set admin.local_only "$ADMIN_LOCAL_ONLY" >/dev/null
+    python3 scripts/projectctl.py set admin.auto_open "$AUTO_OPEN_ADMIN_UI" >/dev/null
+    python3 scripts/projectctl.py set admin.username "$VERIFY_ADMIN_USERNAME" >/dev/null
+    python3 scripts/projectctl.py set admin.password "$VERIFY_ADMIN_PASSWORD" >/dev/null
+    python3 scripts/projectctl.py set onebot.install_client "$INSTALL_ONEBOT_CLIENT" >/dev/null
+    python3 scripts/projectctl.py set runtime.python_mode "$PYTHON_RUNTIME_MODE" >/dev/null
+    python3 scripts/projectctl.py export-env >/dev/null
+  )
 }
 
 render_install_summary() {
@@ -283,6 +273,10 @@ render_install_summary() {
   echo "  管理台仅本机访问：$ADMIN_LOCAL_ONLY"
   echo "  自动打开管理台：$AUTO_OPEN_ADMIN_UI"
   echo "  自动安装 OneBot：$INSTALL_ONEBOT_CLIENT"
+  if [ "$ADMIN_LOCAL_ONLY" = "false" ]; then
+    echo "  管理台账号：$VERIFY_ADMIN_USERNAME"
+  fi
+  echo "  Python 运行模式：$PYTHON_RUNTIME_MODE"
   echo
 }
 
@@ -354,6 +348,7 @@ main() {
       ADMIN_LOCAL_ONLY="$ADMIN_LOCAL_ONLY" \
       AUTO_OPEN_ADMIN_UI="$AUTO_OPEN_ADMIN_UI" \
       INSTALL_ONEBOT_CLIENT="$INSTALL_ONEBOT_CLIENT" \
+      PYTHON_RUNTIME_MODE="$PYTHON_RUNTIME_MODE" \
       INTERACTIVE_INSTALL=0 \
       bash install.sh --local-bootstrap
     )
@@ -386,7 +381,9 @@ run_local_bootstrap() {
   cd "$project_dir"
   collect_install_preferences
   echo "初始化当前项目目录：$project_dir"
-  ONEBOT_CLIENT="$INSTALL_ONEBOT_CLIENT" bash scripts/run.sh --bootstrap-only
+  ONEBOT_CLIENT="$INSTALL_ONEBOT_CLIENT" \
+  PYTHON_RUNTIME_MODE="$PYTHON_RUNTIME_MODE" \
+  bash scripts/run.sh --bootstrap-only
   configure_project_env "$project_dir"
   write_install_metadata "$project_dir"
   echo "已写入 WebUI 配置：$APP_HOST:$APP_PORT"

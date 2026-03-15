@@ -36,6 +36,9 @@ class PluginSettings:
 
     database_url: str
     project_root: Path
+    deploy_profile: str
+    platform_name: str
+    onebot_provider: str
     target_groups: set[int]
     superusers: set[int]
     default_timeout_minutes: int
@@ -48,6 +51,8 @@ class PluginSettings:
     admin_host: str
     admin_port: int
     admin_path: str
+    admin_username: str
+    admin_password: str
     auto_open_admin: bool
     admin_local_only: bool
     lagrange_qr_dir: Path | None
@@ -68,6 +73,11 @@ class PluginSettings:
         (managed_onebot_runtime_dir / "napcat").mkdir(parents=True, exist_ok=True)
         (managed_onebot_runtime_dir / "lagrange").mkdir(parents=True, exist_ok=True)
 
+        deploy_profile = str(getattr(config, "app_deploy_profile", "desktop")).strip().lower() or "desktop"
+        if deploy_profile not in {"desktop", "server"}:
+            deploy_profile = "desktop"
+        platform_name = str(getattr(config, "app_platform", "auto")).strip().lower() or "auto"
+        onebot_provider = str(getattr(config, "verify_onebot_provider", "external")).strip().lower() or "external"
         superusers = _parse_int_set(getattr(config, "superusers", set()))
         target_groups = _parse_int_set(getattr(config, "verify_target_groups", ""))
         timeout_minutes = int(getattr(config, "verify_timeout_minutes", 5))
@@ -77,6 +87,8 @@ class PluginSettings:
         admin_host = str(getattr(config, "host", "127.0.0.1"))
         admin_port = int(getattr(config, "port", 8080))
         admin_path = str(getattr(config, "verify_admin_path", "/admin")).strip() or "/admin"
+        admin_username = str(getattr(config, "verify_admin_username", "admin")).strip() or "admin"
+        admin_password = str(getattr(config, "verify_admin_password", "")).strip()
         auto_open_admin = str(getattr(config, "verify_auto_open_admin", "false")).lower() in {
             "1",
             "true",
@@ -95,6 +107,9 @@ class PluginSettings:
         return cls(
             database_url=f"sqlite+aiosqlite:///{(data_dir / 'group_verify.db').as_posix()}",
             project_root=project_root,
+            deploy_profile=deploy_profile,
+            platform_name=platform_name,
+            onebot_provider=onebot_provider,
             target_groups=target_groups,
             superusers=superusers,
             default_timeout_minutes=timeout_minutes,
@@ -107,6 +122,8 @@ class PluginSettings:
             admin_host=admin_host,
             admin_port=admin_port,
             admin_path=admin_path if admin_path.startswith("/") else f"/{admin_path}",
+            admin_username=admin_username,
+            admin_password=admin_password,
             auto_open_admin=auto_open_admin,
             admin_local_only=admin_local_only,
             lagrange_qr_dir=lagrange_qr_dir,

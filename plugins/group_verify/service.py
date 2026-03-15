@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
 import random
 import shutil
+import smtplib
 import subprocess
-import time
-from dataclasses import dataclass
 from datetime import datetime, timedelta
+from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
@@ -43,59 +44,13 @@ from sqlalchemy import func, select
 from .config import plugin_settings
 from .db import AsyncSessionLocal, init_db
 from .models import AppConfig, GroupConfig, VerifyRecord, VerifyStatus
+from .onebot_runtime import OneBotRuntimeManager
+from .verify_templates import VerifyTemplateManager, VerifyTemplateProfile
+from project_config import export_env_file, load_project_config, save_project_config
 
 
 # HTML 模板文件路径。Playwright 会读取模板内容并渲染成 PNG 图片。
-VERIFY_TEMPLATE_PATH = Path(__file__).parent / "templates" / "verify_card.html"
-VERIFY_THEME_DIR = Path(__file__).parent / "templates" / "themes"
 SERVICE_STATUS_TEMPLATE_PATH = Path(__file__).parent / "templates" / "service_status.html"
-CUSTOM_VERIFY_TEMPLATE_PATH = plugin_settings.data_dir / "verify_card.custom.html"
-ONEBOT_DIR_HINTS = ("lagrange", "onebot", "napcat")
-QR_FILE_PATTERNS = ("qr-*.png", "qrcode*.png", "*qr*.png")
-
-VERIFY_TEMPLATE_PRESETS: dict[str, dict[str, str]] = {
-    "classic": {
-        "name": "经典蓝",
-        "description": "稳妥清爽，适合默认启用。",
-        "file": str(VERIFY_TEMPLATE_PATH),
-    },
-    "glass": {
-        "name": "玻璃霓光",
-        "description": "更强调质感和数字展示，适合偏现代风格。",
-        "file": str(VERIFY_THEME_DIR / "verify_card.glass.html"),
-    },
-    "warning": {
-        "name": "警示橙",
-        "description": "突出时效和操作提醒，适合强调风控提示。",
-        "file": str(VERIFY_THEME_DIR / "verify_card.warning.html"),
-    },
-}
-
-
-@dataclass(slots=True)
-class OneBotClient:
-    """本机扫描到的 OneBot 客户端信息。"""
-
-    name: str
-    root: Path
-    launch_command: list[str]
-    launch_env: dict[str, str] | None = None
-
-    @property
-    def launchable(self) -> bool:
-        return bool(self.launch_command)
-
-
-@dataclass(slots=True)
-class VerifyTemplateProfile:
-    """验证码模板当前状态。"""
-
-    key: str
-    name: str
-    description: str
-    html: str
-    source: str
-    editable: bool
 
 
 class VerifyService:
@@ -109,6 +64,12 @@ class VerifyService:
         self._scan_cache: dict[str, tuple[float, Any]] = {}
         self._random = random.SystemRandom()
         self._started_at = datetime.now()
+        self._onebot_runtime = OneBotRuntimeManager(
+            plugin_settings,
+            self._started_onebot_processes,
+            self._scan_cache,
+        )
+        self._template_manager = VerifyTemplateManager(Path(__file__).parent, plugin_settings.data_dir)
         self._default_app_config: dict[str, str] = {
             "target_groups": ",".join(str(group_id) for group_id in sorted(plugin_settings.target_groups)),
             "superusers": ",".join(str(user_id) for user_id in sorted(plugin_settings.superusers)),
@@ -117,12 +78,37 @@ class VerifyService:
             "playwright_browser": plugin_settings.playwright_browser,
             "image_retry_times": str(plugin_settings.image_retry_times),
             "lagrange_qr_dir": str(plugin_settings.lagrange_qr_dir) if plugin_settings.lagrange_qr_dir else "",
+            "onebot_provider": plugin_settings.onebot_provider,
             "preferred_onebot_client": "",
             "verify_template_preset": "classic",
             "verify_message_template": (
                 "欢迎入群，{{user_name}}。\n"
                 "请在 {{timeout_minutes}} 分钟内发送图片中的 4 位验证码完成验证。\n"
                 "超时或累计输错 {{max_error_times}} 次将被移出群聊。"
+            ),
+            "admin_command_aliases": json.dumps(["入群验证"], ensure_ascii=False),
+            "admin_help_template": (
+                "入群验证命令\n"
+                "━━━━━━━━━━\n"
+                "查看\n"
+                "@机器人\n"
+                "@机器人 帮助\n"
+                "@机器人 服务状态\n"
+                "@机器人 验证记录 [条数]\n"
+                "@机器人 列表\n"
+                "@机器人 状态 群号\n"
+                "\n"
+                "管理\n"
+                "@机器人 开启 群号\n"
+                "@机器人 关闭 群号\n"
+                "@机器人 设置超时 群号 分钟\n"
+                "@机器人 设置次数 群号 次数\n"
+                "\n"
+                "也支持直接发送带前缀命令\n"
+                "入群验证 服务状态 / 入群验证 验证记录 / 入群验证 列表\n"
+                "入群验证 状态 / 开启 / 关闭 / 设置超时 / 设置次数\n"
+                "群聊里可省略群号，例如：入群验证 状态、入群验证 开启、入群验证 设置超时 8、入群验证 设置次数 5\n"
+                "验证记录默认 10 条，可写：@机器人 验证记录 15 或 入群验证 验证记录 15"
             ),
         }
 
@@ -187,8 +173,11 @@ class VerifyService:
 
     async def update_app_configs(self, config_map: dict[str, str]) -> None:
         """保存网页表单中的全局配置。"""
+        previous_runtime_settings = await self.get_runtime_settings()
         async with AsyncSessionLocal() as session:
             for config_key, config_value in config_map.items():
+                if config_key == "playwright_browser":
+                    config_value = self._normalize_playwright_browser(config_value)
                 result = await session.execute(
                     select(AppConfig).where(AppConfig.config_key == config_key)
                 )
@@ -202,6 +191,13 @@ class VerifyService:
 
         await self._ensure_group_configs()
         await self._sync_group_config_defaults()
+        updated_runtime_settings = await self.get_runtime_settings()
+        removed_target_groups = previous_runtime_settings["target_groups"] - updated_runtime_settings["target_groups"]
+        if removed_target_groups:
+            await self._cancel_pending_records_for_groups(
+                removed_target_groups,
+                reason="目标群配置已移除，取消仍在等待中的验证任务。",
+            )
 
     async def get_runtime_settings(self) -> dict[str, Any]:
         """返回当前生效的运行设置，供业务逻辑和 Web 页面共用。"""
@@ -217,20 +213,31 @@ class VerifyService:
                 config_map.get("max_error_times", ""),
                 plugin_settings.default_max_error_times,
             ),
-            "playwright_browser": config_map.get("playwright_browser", plugin_settings.playwright_browser)
-            or plugin_settings.playwright_browser,
+            "playwright_browser": self._normalize_playwright_browser(
+                config_map.get("playwright_browser", plugin_settings.playwright_browser)
+                or plugin_settings.playwright_browser
+            ),
             "image_retry_times": self._safe_int(
                 config_map.get("image_retry_times", ""),
                 plugin_settings.image_retry_times,
             ),
             "lagrange_qr_dir": config_map.get("lagrange_qr_dir", "").strip(),
+            "onebot_provider": config_map.get("onebot_provider", plugin_settings.onebot_provider).strip()
+            or plugin_settings.onebot_provider,
             "preferred_onebot_client": config_map.get("preferred_onebot_client", "").strip(),
-            "verify_template_preset": self._normalize_verify_template_preset(
+            "verify_template_preset": self._template_manager.normalize_key(
                 config_map.get("verify_template_preset", "classic")
             ),
             "verify_message_template": config_map.get(
                 "verify_message_template",
                 self._default_app_config["verify_message_template"],
+            ),
+            "admin_command_aliases": self._parse_text_list(
+                config_map.get("admin_command_aliases", self._default_app_config["admin_command_aliases"])
+            ),
+            "admin_help_template": config_map.get(
+                "admin_help_template",
+                self._default_app_config["admin_help_template"],
             ),
         }
 
@@ -245,6 +252,39 @@ class VerifyService:
             self._default_app_config["verify_message_template"]
         )
 
+    async def get_admin_command_aliases(self) -> list[str]:
+        """返回管理员命令前缀别名。"""
+        runtime_settings = await self.get_runtime_settings()
+        aliases = [str(item).strip() for item in runtime_settings["admin_command_aliases"] if str(item).strip()]
+        return aliases or ["入群验证"]
+
+    async def save_admin_command_aliases(self, raw_text: str) -> tuple[bool, str]:
+        """保存管理员命令前缀别名。"""
+        aliases = self._parse_text_list(raw_text)
+        if not aliases:
+            return False, "至少要保留一个管理员命令前缀别名。"
+        await self.update_app_configs(
+            {"admin_command_aliases": json.dumps(aliases, ensure_ascii=False)}
+        )
+        return True, "管理员命令别名已保存。"
+
+    async def get_admin_help_template(self) -> str:
+        """返回管理员帮助文案模板。"""
+        runtime_settings = await self.get_runtime_settings()
+        return str(runtime_settings["admin_help_template"]).strip() or str(
+            self._default_app_config["admin_help_template"]
+        )
+
+    async def save_admin_help_template(self, raw_text: str) -> tuple[bool, str]:
+        """保存管理员帮助文案模板。"""
+        normalized = raw_text.replace("\r\n", "\n").strip()
+        if not normalized:
+            return False, "管理员帮助模板不能为空。"
+        if len(normalized) > 3000:
+            return False, "管理员帮助模板过长，请控制在 3000 个字符以内。"
+        await self.update_app_configs({"admin_help_template": normalized})
+        return True, "管理员帮助模板已保存。"
+
     async def save_verify_message_template(self, template_text: str) -> tuple[bool, str]:
         """保存入群验证消息模板。"""
         normalized = template_text.replace("\r\n", "\n").strip()
@@ -257,86 +297,198 @@ class VerifyService:
     async def get_verify_template_presets(self) -> list[dict[str, str | bool]]:
         """返回可切换的验证码模板预设列表。"""
         runtime_settings = await self.get_runtime_settings()
-        active_key = runtime_settings["verify_template_preset"]
-        if active_key == "custom" and not CUSTOM_VERIFY_TEMPLATE_PATH.exists():
-            active_key = "classic"
-        presets: list[dict[str, str | bool]] = []
-        for key, meta in VERIFY_TEMPLATE_PRESETS.items():
-            presets.append(
-                {
-                    "key": key,
-                    "name": meta["name"],
-                    "description": meta["description"],
-                    "active": key == active_key,
-                    "editable": False,
-                }
-            )
-        if CUSTOM_VERIFY_TEMPLATE_PATH.exists():
-            presets.append(
-                {
-                    "key": "custom",
-                    "name": "自定义主题",
-                    "description": "来自管理台编辑器，保存后自动生成。",
-                    "active": active_key == "custom",
-                    "editable": True,
-                }
-            )
-        return presets
+        return self._template_manager.list_templates(runtime_settings["verify_template_preset"])
 
     async def get_active_verify_template_profile(self) -> VerifyTemplateProfile:
         """返回当前生效模板的完整信息。"""
         runtime_settings = await self.get_runtime_settings()
-        preset_key = runtime_settings["verify_template_preset"]
-        if preset_key == "custom" and CUSTOM_VERIFY_TEMPLATE_PATH.exists():
-            template_html = CUSTOM_VERIFY_TEMPLATE_PATH.read_text(encoding="utf-8")
-            return VerifyTemplateProfile(
-                key="custom",
-                name="自定义主题",
-                description="当前使用管理台保存的自定义模板。",
-                html=template_html,
-                source="custom",
-                editable=True,
-            )
-
-        normalized_key = self._normalize_verify_template_preset(preset_key)
-        preset_meta = VERIFY_TEMPLATE_PRESETS[normalized_key]
-        template_html = Path(preset_meta["file"]).read_text(encoding="utf-8")
-        return VerifyTemplateProfile(
-            key=normalized_key,
-            name=preset_meta["name"],
-            description=preset_meta["description"],
-            html=template_html,
-            source="preset",
-            editable=False,
-        )
+        return self._template_manager.get_active_template_profile(runtime_settings["verify_template_preset"])
 
     async def save_verify_template_html(self, template_html: str) -> tuple[bool, str]:
         """保存自定义验证码模板。"""
-        normalized = template_html.strip()
-        success, error_message = self._validate_verify_template_html(normalized)
+        success, template_key, message = self._template_manager.save_template_version(
+            template_html=template_html,
+            template_name="自定义模板",
+            based_on=(await self.get_runtime_settings())["verify_template_preset"],
+        )
         if not success:
-            return False, error_message
-        CUSTOM_VERIFY_TEMPLATE_PATH.write_text(normalized + "\n", encoding="utf-8")
-        await self.update_app_configs({"verify_template_preset": "custom"})
-        return True, "验证码模板已保存，并已切换到自定义主题。"
+            return False, message
+        await self.update_app_configs({"verify_template_preset": template_key})
+        return True, message
 
     async def reset_verify_template_html(self) -> None:
         """恢复默认验证码模板。"""
-        if CUSTOM_VERIFY_TEMPLATE_PATH.exists():
-            CUSTOM_VERIFY_TEMPLATE_PATH.unlink()
-        await self.update_app_configs({"verify_template_preset": "classic"})
+        await self.update_app_configs({"verify_template_preset": "preset:classic"})
 
     async def activate_verify_template_preset(self, preset_key: str) -> tuple[bool, str]:
         """切换当前使用的验证码模板预设。"""
-        normalized_key = self._normalize_verify_template_preset(preset_key)
-        if normalized_key == "custom":
-            if not CUSTOM_VERIFY_TEMPLATE_PATH.exists():
-                return False, "当前还没有自定义主题可切换。"
-            await self.update_app_configs({"verify_template_preset": "custom"})
-            return True, "已切换到自定义主题。"
-
+        normalized_key = self._template_manager.normalize_key(preset_key)
+        success, message = self._template_manager.activate_template(normalized_key)
+        if not success:
+            return False, message
         await self.update_app_configs({"verify_template_preset": normalized_key})
-        return True, f"已切换到“{VERIFY_TEMPLATE_PRESETS[normalized_key]['name']}”预设。"
+        return True, message
+
+    async def create_verify_template_version(
+        self,
+        *,
+        template_name: str,
+        template_html: str,
+        based_on: str,
+    ) -> tuple[bool, str]:
+        """保存新的模板库版本并立即切换。"""
+        success, template_key, message = self._template_manager.save_template_version(
+            template_html=template_html,
+            template_name=template_name,
+            based_on=based_on,
+        )
+        if not success:
+            return False, message
+        await self.update_app_configs({"verify_template_preset": template_key})
+        return True, message
+
+    async def delete_verify_template_version(self, template_key: str) -> tuple[bool, str]:
+        """删除指定模板库版本。"""
+        runtime_settings = await self.get_runtime_settings()
+        success, message = self._template_manager.delete_template(template_key)
+        if not success:
+            return False, message
+        if self._template_manager.normalize_key(runtime_settings["verify_template_preset"]) == self._template_manager.normalize_key(template_key):
+            await self.update_app_configs({"verify_template_preset": "preset:classic"})
+        return True, message
+
+    async def get_project_notification_settings(self) -> dict[str, Any]:
+        """读取项目级 SMTP 与代理配置。"""
+        project_config = load_project_config(plugin_settings.project_root)
+        smtp_config = project_config.get("smtp", {})
+        proxy_config = project_config.get("proxy", {})
+        return {
+            "smtp": {
+                "host": str(smtp_config.get("host", "")).strip(),
+                "port": int(smtp_config.get("port", 465) or 465),
+                "username": str(smtp_config.get("username", "")).strip(),
+                "password": str(smtp_config.get("password", "")).strip(),
+                "from_email": str(smtp_config.get("from_email", "")).strip(),
+                "to_email": str(smtp_config.get("to_email", "")).strip(),
+                "use_tls": bool(smtp_config.get("use_tls", False)),
+                "use_ssl": bool(smtp_config.get("use_ssl", True)),
+            },
+            "proxy": {
+                "http_proxy": str(proxy_config.get("http_proxy", "")).strip(),
+                "https_proxy": str(proxy_config.get("https_proxy", "")).strip(),
+                "all_proxy": str(proxy_config.get("all_proxy", "")).strip(),
+                "no_proxy": str(proxy_config.get("no_proxy", "")).strip(),
+            },
+        }
+
+    async def save_project_notification_settings(
+        self,
+        *,
+        smtp_settings: dict[str, Any],
+        proxy_settings: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """保存项目级 SMTP 与代理配置。"""
+        try:
+            smtp_port = int(str(smtp_settings.get("port", "465")).strip() or 465)
+        except ValueError:
+            return False, "SMTP 端口必须是整数。"
+        if smtp_port < 1 or smtp_port > 65535:
+            return False, "SMTP 端口必须在 1 到 65535 之间。"
+        if bool(smtp_settings.get("use_tls", False)) and bool(smtp_settings.get("use_ssl", True)):
+            return False, "SMTP 不能同时开启 SSL 和 STARTTLS。"
+        project_config = load_project_config(plugin_settings.project_root)
+        project_config["smtp"] = {
+            "host": str(smtp_settings.get("host", "")).strip(),
+            "port": smtp_port,
+            "username": str(smtp_settings.get("username", "")).strip(),
+            "password": str(smtp_settings.get("password", "")).strip(),
+            "from_email": str(smtp_settings.get("from_email", "")).strip(),
+            "to_email": str(smtp_settings.get("to_email", "")).strip(),
+            "use_tls": bool(smtp_settings.get("use_tls", False)),
+            "use_ssl": bool(smtp_settings.get("use_ssl", True)),
+        }
+        project_config["proxy"] = {
+            "http_proxy": str(proxy_settings.get("http_proxy", "")).strip(),
+            "https_proxy": str(proxy_settings.get("https_proxy", "")).strip(),
+            "all_proxy": str(proxy_settings.get("all_proxy", "")).strip(),
+            "no_proxy": str(proxy_settings.get("no_proxy", "")).strip(),
+        }
+        save_project_config(plugin_settings.project_root, project_config)
+        export_env_file(plugin_settings.project_root)
+        return True, "SMTP 与统一代理配置已保存，并已同步到 .env。"
+
+    async def send_test_email(
+        self,
+        *,
+        to_email: str,
+        subject: str,
+        content: str,
+    ) -> tuple[bool, str]:
+        """按项目 SMTP 配置发送测试邮件。"""
+        project_settings = await self.get_project_notification_settings()
+        smtp_settings = project_settings["smtp"]
+        host = str(smtp_settings["host"]).strip()
+        if not host:
+            return False, "SMTP 主机未配置。"
+        recipient = to_email.strip() or str(smtp_settings["to_email"]).strip()
+        if not recipient:
+            return False, "请先配置默认收件人，或填写测试收件邮箱。"
+        sender = str(smtp_settings["from_email"]).strip() or str(smtp_settings["username"]).strip()
+        if not sender:
+            return False, "SMTP 发件人为空，请至少配置 from_email 或 username。"
+
+        message = EmailMessage()
+        message["From"] = sender
+        message["To"] = recipient
+        message["Subject"] = subject.strip() or "入群验证机器人 SMTP 测试邮件"
+        message.set_content(content.strip() or "这是一封来自入群验证机器人管理台的测试邮件。", subtype="plain")
+
+        def _send() -> None:
+            port = int(smtp_settings["port"])
+            username = str(smtp_settings["username"]).strip()
+            password = str(smtp_settings["password"]).strip()
+            use_ssl = bool(smtp_settings["use_ssl"])
+            use_tls = bool(smtp_settings["use_tls"])
+            if use_ssl:
+                server: smtplib.SMTP | smtplib.SMTP_SSL = smtplib.SMTP_SSL(host, port, timeout=20)
+            else:
+                server = smtplib.SMTP(host, port, timeout=20)
+            try:
+                server.ehlo()
+                if use_tls:
+                    server.starttls()
+                    server.ehlo()
+                if username:
+                    server.login(username, password)
+                server.send_message(message)
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    server.close()
+
+        try:
+            await asyncio.to_thread(_send)
+        except Exception as exc:
+            logger.warning(f"SMTP 测试邮件发送失败 error={exc}")
+            return False, f"测试邮件发送失败：{exc}"
+        return True, f"测试邮件已发送到 {recipient}。"
+
+    async def reset_setup_state(self) -> None:
+        """清空初始化向导相关状态，便于重新走首次流程。"""
+        await self.update_app_configs(
+            {
+                "target_groups": "",
+                "superusers": "",
+                "preferred_onebot_client": "",
+            }
+        )
+        runtime_root = plugin_settings.managed_onebot_runtime_dir
+        for child_name in ("napcat", "lagrange"):
+            child = runtime_root / child_name
+            if child.exists():
+                shutil.rmtree(child, ignore_errors=True)
+                child.mkdir(parents=True, exist_ok=True)
 
     async def get_target_groups(self) -> set[int]:
         """获取当前生效的目标群集合。"""
@@ -356,14 +508,14 @@ class VerifyService:
     async def set_preferred_onebot_client(self, client_root: str) -> bool:
         """保存当前选中的 OneBot 客户端。"""
         runtime_settings = await self.get_runtime_settings()
-        client = self._find_onebot_client(
+        client = self._onebot_runtime.find_onebot_client(
             client_root,
-            runtime_dir_text=runtime_settings["lagrange_qr_dir"],
+            runtime_settings=runtime_settings,
         )
         if client is None:
             return False
         await self.update_app_configs({"preferred_onebot_client": str(client.root)})
-        self._scan_cache.clear()
+        self._onebot_runtime.clear_cache()
         return True
 
     async def _sync_group_config_defaults(self) -> None:
@@ -381,29 +533,6 @@ class VerifyService:
             await session.commit()
 
     @staticmethod
-    def _normalize_verify_template_preset(raw_value: str) -> str:
-        """把模板预设名规范化为已支持的键。"""
-        preset_key = str(raw_value).strip().lower() or "classic"
-        if preset_key == "custom":
-            return "custom"
-        if preset_key not in VERIFY_TEMPLATE_PRESETS:
-            return "classic"
-        return preset_key
-
-    @staticmethod
-    def _validate_verify_template_html(template_html: str) -> tuple[bool, str]:
-        """校验模板是否包含渲染所需的关键结构。"""
-        if not template_html:
-            return False, "模板内容不能为空。"
-        if 'id="verify-card"' not in template_html and "id='verify-card'" not in template_html:
-            return False, '模板里必须保留 id="verify-card" 的根节点。'
-        required_placeholders = ("{{verify_code}}", "{{user_qq}}", "{{group_name}}", "{{expire_time}}")
-        missing = [item for item in required_placeholders if item not in template_html]
-        if missing:
-            return False, f"模板缺少占位符：{', '.join(missing)}"
-        return True, ""
-
-    @staticmethod
     def _validate_verify_message_template(template_text: str) -> tuple[bool, str]:
         """校验入群提示消息模板。"""
         if not template_text:
@@ -411,6 +540,14 @@ class VerifyService:
         if len(template_text) > 600:
             return False, "消息模板过长，请控制在 600 个字符以内。"
         return True, ""
+
+    @staticmethod
+    def _normalize_playwright_browser(raw_value: str) -> str:
+        """当前运行脚本只安装 Chromium，因此统一收敛到 chromium。"""
+        browser_name = str(raw_value).strip().lower() or "chromium"
+        if browser_name != "chromium":
+            return "chromium"
+        return browser_name
 
     async def set_group_enabled(self, group_id: int, enabled: bool) -> bool:
         """开启或关闭指定群验证功能。"""
@@ -425,6 +562,11 @@ class VerifyService:
             group_config.enabled = enabled
             group_config.updated_at = datetime.now()
             await session.commit()
+            if not enabled:
+                await self._cancel_pending_records_for_groups(
+                    {group_id},
+                    reason="该群已关闭入群验证，取消仍在等待中的验证任务。",
+                )
             return True
 
     async def get_group_config(self, group_id: int) -> GroupConfig | None:
@@ -445,6 +587,47 @@ class VerifyService:
             [item for item in group_configs if item.group_id in target_groups],
             key=lambda item: item.group_id,
         )
+
+    async def get_bot_group_overview(self) -> list[dict[str, Any]]:
+        """读取机器人当前所在群列表，并补充管理员状态。"""
+        bot = self._get_available_bot()
+        if bot is None:
+            return []
+
+        runtime_settings = await self.get_runtime_settings()
+        selected_groups = set(runtime_settings["target_groups"])
+        records: list[dict[str, Any]] = []
+        try:
+            group_list = await bot.get_group_list()
+        except Exception as exc:
+            logger.warning(f"获取机器人群列表失败 error={exc}")
+            return []
+
+        for item in group_list:
+            group_id = int(item.get("group_id", 0))
+            if group_id <= 0:
+                continue
+            group_name = str(item.get("group_name", "")).strip() or str(group_id)
+            role = "unknown"
+            try:
+                member_info = await bot.get_group_member_info(
+                    group_id=group_id,
+                    user_id=int(bot.self_id),
+                    no_cache=True,
+                )
+                role = str(member_info.get("role", "unknown")).strip().lower() or "unknown"
+            except Exception as exc:
+                logger.warning(f"获取机器人群成员状态失败 group_id={group_id} error={exc}")
+            records.append(
+                {
+                    "group_id": group_id,
+                    "group_name": group_name,
+                    "selected": group_id in selected_groups,
+                    "is_admin": role in {"admin", "owner"},
+                    "role": role,
+                }
+            )
+        return sorted(records, key=lambda item: (not bool(item["selected"]), str(item["group_name"])))
 
     async def update_group_timeout_minutes(self, group_id: int, timeout_minutes: int) -> bool:
         """更新单群验证超时时间。"""
@@ -504,6 +687,7 @@ class VerifyService:
 
         key = (group_id, user_id)
         async with self._get_lock(key):
+            record: VerifyRecord | None = None
             try:
                 join_time = datetime.now()
                 expire_time = join_time + timedelta(minutes=group_config.timeout_minutes)
@@ -515,9 +699,6 @@ class VerifyService:
                     join_time=join_time,
                     expire_time=expire_time,
                 )
-
-                # 新记录写入完成后，立刻创建新的超时任务。
-                self._create_timeout_task(group_id, user_id, record.id, expire_time)
 
                 group_name = await self._fetch_group_name(bot, group_id)
                 image_bytes = await self._render_verify_image_with_retry(
@@ -542,12 +723,32 @@ class VerifyService:
                 else:
                     # 按要求增加兜底：HTML 渲染彻底失败时仍然继续流程，防止插件中断。
                     message += MessageSegment.text(f"\n验证码：{verify_code}")
+            except Exception as exc:
+                if record is not None:
+                    await self._cancel_pending_record(
+                        group_id=group_id,
+                        user_id=user_id,
+                        reason="入群验证准备阶段失败，已取消本轮待验证记录。",
+                    )
+                logger.exception(
+                    f"处理入群验证准备阶段失败 group_id={group_id} user_id={user_id} error={exc}"
+                )
+                return
 
+            try:
                 await bot.send_group_msg(group_id=group_id, message=message)
             except Exception as exc:
-                logger.exception(
-                    f"处理入群验证流程失败 group_id={group_id} user_id={user_id} error={exc}"
+                await self._cancel_pending_record(
+                    group_id=group_id,
+                    user_id=user_id,
+                    reason="验证码消息发送失败，已取消本轮待验证记录。",
                 )
+                logger.exception(
+                    f"发送入群验证消息失败 group_id={group_id} user_id={user_id} error={exc}"
+                )
+                return
+
+            self._create_timeout_task(group_id, user_id, record.id, expire_time)
 
     async def handle_group_message(self, bot: Bot, event: GroupMessageEvent) -> None:
         """
@@ -666,6 +867,13 @@ class VerifyService:
             await session.commit()
 
         for record in pending_records:
+            if not await self._is_group_verification_active(record.group_id):
+                await self._cancel_pending_record(
+                    group_id=record.group_id,
+                    user_id=record.user_id,
+                    reason="群验证配置已关闭，跳过恢复旧的待验证任务。",
+                )
+                continue
             self._create_timeout_task(
                 record.group_id,
                 record.user_id,
@@ -740,6 +948,59 @@ class VerifyService:
             record.status = status
             record.updated_at = datetime.now()
             await session.commit()
+
+    async def _cancel_pending_record(self, *, group_id: int, user_id: int, reason: str = "") -> None:
+        """取消某个用户当前仍待处理的验证。"""
+        key = (group_id, user_id)
+        self._cancel_timeout_task(key)
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VerifyRecord).where(
+                    VerifyRecord.group_id == group_id,
+                    VerifyRecord.user_id == user_id,
+                    VerifyRecord.status == VerifyStatus.PENDING,
+                )
+            )
+            record = result.scalar_one_or_none()
+            if record is None:
+                return
+            record.status = VerifyStatus.CANCELLED
+            record.updated_at = datetime.now()
+            await session.commit()
+        if reason:
+            logger.info(f"{reason} group_id={group_id} user_id={user_id}")
+
+    async def _cancel_pending_records_for_groups(self, group_ids: set[int], *, reason: str = "") -> None:
+        """批量取消指定群里仍待处理的验证，并清理内存中的超时任务。"""
+        if not group_ids:
+            return
+        pending_keys = [key for key in self._tasks if key[0] in group_ids]
+        for key in pending_keys:
+            self._cancel_timeout_task(key)
+
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(VerifyRecord).where(
+                    VerifyRecord.group_id.in_(group_ids),
+                    VerifyRecord.status == VerifyStatus.PENDING,
+                )
+            )
+            records = result.scalars().all()
+            for record in records:
+                record.status = VerifyStatus.CANCELLED
+                record.updated_at = datetime.now()
+            await session.commit()
+
+        if reason and records:
+            logger.info(f"{reason} groups={sorted(group_ids)} affected={len(records)}")
+
+    async def _is_group_verification_active(self, group_id: int) -> bool:
+        """确认某个群当前仍受入群验证管理。"""
+        target_groups = await self.get_target_groups()
+        if group_id not in target_groups:
+            return False
+        group_config = await self.get_group_config(group_id)
+        return bool(group_config is not None and group_config.enabled)
 
     async def _increase_error_count(self, record_id: int) -> int:
         """用户输错验证码时递增错误次数，并返回最新次数。"""
@@ -898,7 +1159,7 @@ class VerifyService:
     def _cancel_timeout_task(self, key: tuple[int, int]) -> None:
         """取消指定用户已有的超时任务。"""
         task = self._tasks.pop(key, None)
-        if task is not None and not task.done():
+        if task is not None and not task.done() and task is not asyncio.current_task():
             task.cancel()
 
     async def _timeout_worker(
@@ -928,6 +1189,14 @@ class VerifyService:
                     return
 
                 if datetime.now() < record.expire_time:
+                    return
+
+                if not await self._is_group_verification_active(group_id):
+                    await self._cancel_pending_record(
+                        group_id=group_id,
+                        user_id=user_id,
+                        reason="超时任务执行前检测到群验证已关闭，忽略旧任务。",
+                    )
                     return
 
                 await self._mark_record_status(record.id, VerifyStatus.TIMEOUT_KICKED)
@@ -1351,9 +1620,8 @@ class VerifyService:
         """返回首次引导页需要的状态信息。"""
         runtime_settings = await self.get_runtime_settings()
         clients = await self.get_detected_onebot_clients()
-        selected_client = self._resolve_selected_client(
-            clients,
-            runtime_settings["preferred_onebot_client"],
+        selected_client = self._onebot_runtime.resolve_selected_client(
+            clients, runtime_settings["preferred_onebot_client"]
         )
         qr_image = await self.get_latest_qr_image(
             selected_client_root=str(selected_client["root"]) if selected_client else None
@@ -1376,403 +1644,31 @@ class VerifyService:
     async def get_latest_qr_image(self, selected_client_root: str | None = None) -> Path | None:
         """自动查找最新二维码图片，优先使用当前选中的客户端。"""
         runtime_settings = await self.get_runtime_settings()
-        cache_key = f"latest_qr_image:{selected_client_root or ''}:{runtime_settings['lagrange_qr_dir']}"
-        cached = self._get_cache(cache_key)
-        if cached is not None:
-            return cached
-
-        candidates: list[Path] = []
-        if selected_client_root:
-            client = self._find_onebot_client(
-                selected_client_root,
-                runtime_dir_text=runtime_settings["lagrange_qr_dir"],
-            )
-            if client is not None:
-                candidates.extend(self._find_qr_images_for_client(client.root))
-        else:
-            qr_dir_text = runtime_settings["lagrange_qr_dir"]
-            if qr_dir_text:
-                qr_dir = Path(qr_dir_text).expanduser()
-                candidates.extend(self._find_qr_images_in_dir(qr_dir))
-
-            for candidate_dir in self._discover_qr_search_dirs(runtime_settings["lagrange_qr_dir"]):
-                candidates.extend(self._find_qr_images_in_dir(candidate_dir))
-
-        latest = self._pick_latest_file(candidates)
-        self._set_cache(cache_key, latest)
-        return latest
+        return await self._onebot_runtime.get_latest_qr_image(
+            runtime_settings,
+            selected_client_root=selected_client_root,
+        )
 
     async def get_detected_onebot_clients(self) -> list[dict[str, str | bool]]:
         """扫描本机可能的 OneBot 客户端目录。"""
         runtime_settings = await self.get_runtime_settings()
-        cache_key = f"onebot_clients:{runtime_settings['lagrange_qr_dir']}"
-        cached = self._get_cache(cache_key)
-        if cached is None:
-            selected_root = runtime_settings["preferred_onebot_client"]
-            cached = [
-                self._serialize_onebot_client(item, selected_root=selected_root)
-                for item in self._discover_onebot_clients(runtime_settings["lagrange_qr_dir"])
-            ]
-            self._set_cache(cache_key, cached)
-        return cached
+        return await self._onebot_runtime.get_detected_onebot_clients(runtime_settings)
 
     async def get_primary_onebot_client(self) -> dict[str, str | bool] | None:
         """返回当前最适合展示和启动的客户端。"""
         runtime_settings = await self.get_runtime_settings()
-        clients = await self.get_detected_onebot_clients()
-        return self._resolve_selected_client(
-            clients,
-            runtime_settings["preferred_onebot_client"],
-        )
+        return await self._onebot_runtime.get_primary_onebot_client(runtime_settings)
 
     async def launch_detected_onebot(self, client_root: str) -> tuple[bool, str]:
         """启动用户明确选择的 OneBot 客户端。"""
         runtime_settings = await self.get_runtime_settings()
-        client = self._find_onebot_client(client_root, runtime_dir_text=runtime_settings["lagrange_qr_dir"])
-        if client is None:
-            return False, "未找到你选择的 OneBot 客户端，请先刷新页面后重新选择。"
-        if not client.launchable:
-            return False, "这个客户端目录只能检测，不能安全自动启动，请手动启动它。"
-
-        process_key = str(client.root)
-        process = self._started_onebot_processes.get(process_key)
-        if process is not None and process.poll() is None:
-            return True, f"{client.name} 已经在运行中。"
-
-        try:
-            process = subprocess.Popen(
-                client.launch_command,
-                cwd=client.root,
-                env=client.launch_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except Exception as exc:
-            logger.exception(f"自动启动 OneBot 失败 root={client.root} error={exc}")
-            return False, f"自动启动失败：{exc}"
-
-        self._started_onebot_processes[process_key] = process
-        await self.update_app_configs({"preferred_onebot_client": str(client.root)})
-        self._scan_cache.clear()
-        return True, f"已尝试启动 {client.name}，请等待二维码生成。"
-
-    def _discover_qr_search_dirs(self, runtime_dir_text: str = "") -> list[Path]:
-        """扫描可能生成二维码的目录。"""
-        candidate_dirs = self._collect_candidate_dirs(runtime_dir_text)
-        qr_dirs: list[Path] = []
-        for directory in candidate_dirs:
-            if directory not in qr_dirs:
-                qr_dirs.append(directory)
-            for subdir in self._get_qr_related_subdirs(directory):
-                if subdir not in qr_dirs:
-                    qr_dirs.append(subdir)
-        return qr_dirs
-
-    def _discover_onebot_clients(self, runtime_dir_text: str = "") -> list[OneBotClient]:
-        """扫描可能存在的 Lagrange / NapCat 客户端。"""
-        clients: list[OneBotClient] = []
-        seen_roots: set[Path] = set()
-        for directory in self._collect_candidate_dirs(runtime_dir_text):
-            if directory in seen_roots:
-                continue
-            seen_roots.add(directory)
-            client = self._build_onebot_client(directory)
-            if client is not None:
-                clients.append(client)
-        clients.sort(key=lambda item: (not item.launchable, item.name.lower(), str(item.root)))
-        return clients
-
-    def _collect_candidate_dirs(self, runtime_dir_text: str = "") -> list[Path]:
-        """优先从项目内独立目录和显式配置目录里筛选候选目录。"""
-        roots: list[Path] = []
-        if runtime_dir_text:
-            roots.append(Path(runtime_dir_text).expanduser())
-        elif plugin_settings.lagrange_qr_dir is not None:
-            roots.append(plugin_settings.lagrange_qr_dir.expanduser())
-        roots.extend(self._get_project_candidate_roots())
-
-        candidate_dirs: list[Path] = []
-        seen: set[Path] = set()
-        for root in roots:
-            if not root.exists() or not root.is_dir():
-                continue
-            for directory in self._walk_candidate_dirs(root):
-                if directory not in seen:
-                    seen.add(directory)
-                    candidate_dirs.append(directory)
-        return candidate_dirs
-
-    def _walk_candidate_dirs(self, root: Path, max_depth: int = 4) -> list[Path]:
-        """限制深度扫描可疑目录，避免每次页面加载遍历整个磁盘。"""
-        directories: list[Path] = []
-        skip_names = {
-            ".git",
-            ".venv",
-            "__pycache__",
-            "node_modules",
-            ".cache",
-            ".local",
-            ".cargo",
-            ".rustup",
-            ".npm",
-        }
-        allow_hidden = root.name.startswith(".")
-        for current_root, dirnames, _filenames in os.walk(root):
-            current_path = Path(current_root)
-            depth = len(current_path.relative_to(root).parts)
-            if depth > max_depth:
-                dirnames[:] = []
-                continue
-
-            dirnames[:] = [
-                name
-                for name in dirnames
-                if name not in skip_names and (allow_hidden or not name.startswith("."))
-            ]
-            if self._is_onebot_related_dir(current_path):
-                directories.append(current_path)
-        return directories
-
-    def _get_project_candidate_roots(self) -> list[Path]:
-        """项目内独立运行目录，避免误扫系统 QQ。"""
-        return [
-            plugin_settings.managed_onebot_dir,
-            plugin_settings.managed_onebot_dir / "napcat",
-            plugin_settings.managed_onebot_dir / "lagrange",
-            plugin_settings.managed_onebot_runtime_dir,
-            plugin_settings.managed_onebot_runtime_dir / "napcat",
-            plugin_settings.managed_onebot_runtime_dir / "lagrange",
-            plugin_settings.project_root / "third_party",
-            plugin_settings.project_root / "data" / "group_verify",
-            Path.home() / "Napcat",
-        ]
-
-    def _get_qr_related_subdirs(self, directory: Path) -> list[Path]:
-        """补充更可能出现登录二维码的子目录。"""
-        subdirs = [
-            directory / "config",
-            directory / "data",
-            directory / "cache",
-            directory / "QQ",
-            directory / "qq",
-            directory / "global",
-            directory / "global" / "nt_data",
-            directory / ".config" / "QQ",
-            directory / ".config" / "NapCat",
-            directory / ".config" / "napcat",
-            directory / "opt" / "QQ" / "resources" / "app" / "app_launcher" / "napcat" / "cache",
-        ]
-        return [item for item in subdirs if item.exists() and item.is_dir()]
-
-    @staticmethod
-    def _is_valid_napcat_dir(directory: Path) -> bool:
-        """仅把真正注入了 NapCat Shell 的目录识别为 NapCat。"""
-        markers = (
-            directory / "config" / "onebot11_qq.json",
-            directory / "opt" / "QQ" / "resources" / "app" / "loadNapCat.js",
-            directory / "opt" / "QQ" / "resources" / "app" / "app_launcher" / "napcat" / "napcat.mjs",
-            directory / "QQ" / "resources" / "app" / "loadNapCat.js",
-            directory / "QQ" / "resources" / "app" / "app_launcher" / "napcat" / "napcat.mjs",
-        )
-        return any(path.exists() for path in markers)
-
-    def _is_onebot_related_dir(self, directory: Path) -> bool:
-        """判断目录是否像是 Lagrange / NapCat 运行目录。"""
-        lower_name = directory.name.lower()
-        if "nonebot" in lower_name:
-            return False
-        if "lagrange" in lower_name:
-            return True
-        if self._is_valid_napcat_dir(directory):
-            return True
-        if "napcat" in lower_name:
-            return False
-        if (directory / "config" / "onebot11_qq.json").exists():
-            return True
-        if (directory / "QQ").exists():
-            return True
-        return False
-
-    def _find_qr_images_in_dir(self, directory: Path) -> list[Path]:
-        """从指定目录里查找二维码图片。"""
-        if not directory.exists() or not directory.is_dir():
-            return []
-
-        candidates: list[Path] = []
-        for pattern in QR_FILE_PATTERNS:
-            for item in directory.glob(pattern):
-                if item.is_file():
-                    candidates.append(item)
-        return candidates
-
-    def _find_qr_images_for_client(self, client_root: Path) -> list[Path]:
-        """查找某个客户端目录及其相关子目录中的二维码。"""
-        directories = [client_root]
-        for subdir in self._get_qr_related_subdirs(client_root):
-            if subdir not in directories:
-                directories.append(subdir)
-
-        candidates: list[Path] = []
-        for directory in directories:
-            candidates.extend(self._find_qr_images_in_dir(directory))
-        return candidates
-
-    def _pick_latest_file(self, candidates: list[Path]) -> Path | None:
-        """返回候选文件中最新的一个。"""
-        unique_candidates: list[Path] = []
-        seen: set[Path] = set()
-        for item in candidates:
-            try:
-                resolved = item.resolve()
-            except FileNotFoundError:
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            unique_candidates.append(item)
-        if not unique_candidates:
-            return None
-        return max(unique_candidates, key=lambda item: item.stat().st_mtime)
-
-    def _build_onebot_client(self, directory: Path) -> OneBotClient | None:
-        """把候选目录解析为可展示/可启动的客户端。"""
-        lower_name = directory.name.lower()
-        name = "OneBot"
-        launch_command: list[str] = []
-        launch_env: dict[str, str] | None = None
-
-        lagrange_exec = next(
-            (
-                path
-                for path in (
-                    directory / "Lagrange.OneBot",
-                    directory / "Lagrange.OneBot.exe",
-                )
-                if path.exists() and path.is_file()
+        return await self._onebot_runtime.launch_detected_onebot(
+            client_root,
+            runtime_settings,
+            lambda preferred_root: self.update_app_configs(
+                {"preferred_onebot_client": preferred_root}
             ),
-            None,
         )
-        napcat_exec = next(
-            (
-                path
-                for path in (
-                    directory / "napcat",
-                    directory / "NapCat",
-                    directory / "NapCat.Shell",
-                    directory / "opt" / "QQ" / "qq",
-                )
-                if path.exists() and path.is_file()
-            ),
-            None,
-        )
-
-        if lagrange_exec is not None:
-            name = "Lagrange.OneBot"
-            launch_command = [str(lagrange_exec)]
-        elif napcat_exec is not None and self._is_valid_napcat_dir(directory):
-            name = "NapCat"
-            launch_command = [str(napcat_exec)]
-            if napcat_exec.name == "qq":
-                runtime_root = self._prepare_managed_runtime_dir("napcat")
-                launch_command = [
-                    str(napcat_exec),
-                    f"--user-data-dir={runtime_root / 'chromium'}",
-                ]
-                launch_env = self._build_managed_launch_env(runtime_root)
-        elif "lagrange" in lower_name:
-            name = "Lagrange.OneBot"
-        elif self._is_valid_napcat_dir(directory):
-            name = "NapCat"
-
-        if not self._is_onebot_related_dir(directory):
-            return None
-        return OneBotClient(
-            name=name,
-            root=directory,
-            launch_command=launch_command,
-            launch_env=launch_env,
-        )
-
-    def _prepare_managed_runtime_dir(self, client_name: str) -> Path:
-        """为项目内隔离运行准备数据目录。"""
-        runtime_root = plugin_settings.managed_onebot_runtime_dir / client_name
-        for subdir in ("config", "data", "cache", "chromium", "home"):
-            (runtime_root / subdir).mkdir(parents=True, exist_ok=True)
-        return runtime_root
-
-    def _build_managed_launch_env(self, runtime_root: Path) -> dict[str, str]:
-        """构建隔离运行环境变量，避免复用系统 QQ 数据。"""
-        env = os.environ.copy()
-        env["XDG_CONFIG_HOME"] = str(runtime_root / "config")
-        env["XDG_DATA_HOME"] = str(runtime_root / "data")
-        env["XDG_CACHE_HOME"] = str(runtime_root / "cache")
-        env["HOME"] = str(runtime_root / "home")
-        return env
-
-    def _serialize_onebot_client(
-        self,
-        client: OneBotClient,
-        *,
-        selected_root: str = "",
-    ) -> dict[str, str | bool]:
-        """把客户端对象转成页面可直接渲染的结构。"""
-        process = self._started_onebot_processes.get(str(client.root))
-        running = process is not None and process.poll() is None
-        latest_qr = self._pick_latest_file(self._find_qr_images_for_client(client.root))
-        return {
-            "name": client.name,
-            "root": str(client.root),
-            "launchable": client.launchable,
-            "running": running,
-            "has_qr_image": latest_qr is not None,
-            "selected": str(client.root) == selected_root,
-        }
-
-    def _find_onebot_client(self, client_root: str, *, runtime_dir_text: str = "") -> OneBotClient | None:
-        """按目录定位具体客户端。"""
-        target = Path(client_root).expanduser()
-        for client in self._discover_onebot_clients(runtime_dir_text):
-            if client.root == target:
-                return client
-        return None
-
-    @staticmethod
-    def _resolve_selected_client(
-        clients: list[dict[str, str | bool]],
-        preferred_root: str,
-    ) -> dict[str, str | bool] | None:
-        """解析当前应当使用的客户端。"""
-        if preferred_root:
-            for client in clients:
-                if str(client["root"]) == preferred_root:
-                    return client
-        for predicate in (
-            lambda item: bool(item.get("running")),
-            lambda item: bool(item.get("has_qr_image")),
-            lambda item: bool(item.get("launchable")),
-            lambda item: True,
-        ):
-            for client in clients:
-                if predicate(client):
-                    return client
-        return None
-
-    def _get_cache(self, key: str, ttl_seconds: float = 5.0) -> Any | None:
-        """读取短期缓存，减少页面刷新时重复扫描磁盘。"""
-        cached = self._scan_cache.get(key)
-        if cached is None:
-            return None
-        cached_at, value = cached
-        if time.monotonic() - cached_at > ttl_seconds:
-            self._scan_cache.pop(key, None)
-            return None
-        return value
-
-    def _set_cache(self, key: str, value: Any) -> None:
-        """写入短期缓存。"""
-        self._scan_cache[key] = (time.monotonic(), value)
 
     @staticmethod
     def _parse_csv_int_set(raw_text: str) -> set[int]:
@@ -1791,6 +1687,32 @@ class VerifyService:
             return int(str(raw_text).strip())
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _parse_text_list(raw_value: str | list[str]) -> list[str]:
+        """把 JSON 数组或逗号换行文本解析成去重字符串列表。"""
+        if isinstance(raw_value, list):
+            items = raw_value
+        else:
+            text = str(raw_value).strip()
+            if not text:
+                return []
+            try:
+                loaded = json.loads(text)
+            except json.JSONDecodeError:
+                normalized_text = text.replace("，", ",").replace("\n", ",")
+                items = [item for item in normalized_text.split(",") if item.strip()]
+            else:
+                if isinstance(loaded, list):
+                    items = loaded
+                else:
+                    items = [str(loaded)]
+        result: list[str] = []
+        for item in items:
+            text = str(item).strip()
+            if text and text not in result:
+                result.append(text)
+        return result
 
     @staticmethod
     def _format_bytes(num_bytes: float) -> str:

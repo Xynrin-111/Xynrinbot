@@ -10,7 +10,7 @@ NoneBot2 插件入口。
 
 from __future__ import annotations
 
-from nonebot import get_driver, on_message, on_notice, on_regex
+from nonebot import get_driver, on_message, on_notice
 from nonebot.adapters.onebot.v11 import GroupIncreaseNoticeEvent, GroupMessageEvent, MessageSegment
 from nonebot.rule import to_me
 
@@ -58,11 +58,7 @@ async def _handle_verify_message(bot, event) -> None:
 
 
 verify_admin_mention_matcher = on_message(rule=to_me(), priority=1, block=True)
-verify_admin_text_matcher = on_regex(
-    r"^\s*(?:入群验证\s+)?(?:服务状态|状态图|status|验证记录|记录|records|列表|list|状态总览|状态|开启|关闭|设置超时|设置次数)(?:\s|$)",
-    priority=1,
-    block=True,
-)
+verify_admin_text_matcher = on_message(priority=1, block=False)
 
 
 @verify_admin_mention_matcher.handle()
@@ -70,7 +66,7 @@ async def _handle_verify_admin_mention(bot, event) -> None:
     """超级管理员艾特机器人时执行管理命令；空消息默认返回帮助。"""
     if not isinstance(event, GroupMessageEvent):
         return
-    raw_text = _normalize_admin_command_text(
+    raw_text = await _normalize_admin_command_text(
         str(getattr(event, "get_plaintext", lambda: "")()).strip()
     )
     await _run_verify_admin_command(
@@ -84,12 +80,14 @@ async def _handle_verify_admin_mention(bot, event) -> None:
 
 @verify_admin_text_matcher.handle()
 async def _handle_verify_admin_plain_text(bot, event) -> None:
-    """允许超级管理员直接发送纯命令，不再强制要求固定前缀。"""
+    """允许超级管理员直接发送带“入群验证”前缀的纯文本命令。"""
     if not isinstance(event, GroupMessageEvent):
         return
-    raw_text = _normalize_admin_command_text(
+    raw_text = await _normalize_admin_command_text(
         str(getattr(event, "get_plaintext", lambda: "")()).strip()
     )
+    if not raw_text:
+        return
     await _run_verify_admin_command(
         bot,
         event,
@@ -99,11 +97,16 @@ async def _handle_verify_admin_plain_text(bot, event) -> None:
     )
 
 
-def _normalize_admin_command_text(raw_text: str) -> str:
-    """兼容旧版“入群验证”前缀，同时支持直接发送子命令。"""
+async def _normalize_admin_command_text(raw_text: str) -> str:
+    """统一去掉命令前缀，便于后续只处理子命令。"""
     normalized = raw_text.strip()
-    if normalized.startswith("入群验证"):
-        normalized = normalized[len("入群验证") :].strip()
+    aliases = await verify_service.get_admin_command_aliases()
+    for alias in aliases:
+        if normalized == alias:
+            return ""
+        if normalized.startswith(f"{alias} "):
+            normalized = normalized[len(alias) :].strip()
+            break
     return normalized
 
 
@@ -118,11 +121,13 @@ async def _run_verify_admin_command(
     """执行超级管理员命令。"""
     superusers = await verify_service.get_superusers()
     if getattr(event, "user_id", 0) not in superusers:
-        await matcher.finish("只有已配置的超级管理员可以执行该命令")
+        if triggered_by_mention:
+            await matcher.finish("只有已配置的超级管理员可以执行该命令")
+        return
 
     if not raw_text:
         if triggered_by_mention:
-            await matcher.finish(_render_verify_admin_help())
+            await matcher.finish(await _render_verify_admin_help())
         return
 
     parts = raw_text.split()
@@ -130,7 +135,7 @@ async def _run_verify_admin_command(
 
     if action in {"帮助", "help", "Help", "HELP"}:
         if triggered_by_mention:
-            await matcher.finish(_render_verify_admin_help())
+            await matcher.finish(await _render_verify_admin_help())
         return
 
     if action in {"服务状态", "状态图", "status"}:
@@ -237,34 +242,13 @@ async def _run_verify_admin_command(
 
     await matcher.finish(
         "不支持的子命令。\n"
-        f"{_render_verify_admin_help()}"
+        f"{await _render_verify_admin_help()}"
     )
 
 
-def _render_verify_admin_help() -> str:
+async def _render_verify_admin_help() -> str:
     """返回群管命令帮助文本。"""
-    return (
-        "入群验证命令\n"
-        "━━━━━━━━━━\n"
-        "查看\n"
-        "@机器人\n"
-        "@机器人 帮助\n"
-        "@机器人 服务状态\n"
-        "@机器人 验证记录 [条数]\n"
-        "@机器人 列表\n"
-        "@机器人 状态 群号\n"
-        "\n"
-        "管理\n"
-        "@机器人 开启 群号\n"
-        "@机器人 关闭 群号\n"
-        "@机器人 设置超时 群号 分钟\n"
-        "@机器人 设置次数 群号 次数\n"
-        "\n"
-        "也支持直接发送\n"
-        "服务状态 / 验证记录 / 列表 / 状态 / 开启 / 关闭 / 设置超时 / 设置次数\n"
-        "群聊里可省略群号，例如：状态、开启、设置超时 8、设置次数 5\n"
-        "验证记录默认 10 条，可写：验证记录 15"
-    )
+    return await verify_service.get_admin_help_template()
 
 
 def _resolve_target_group_id(parts, event, *, action: str) -> int:
@@ -285,5 +269,5 @@ def _resolve_group_and_value(parts, event, *, action: str) -> tuple[int, int]:
     if len(parts) == 2 and parts[1].isdigit() and isinstance(event, GroupMessageEvent):
         return int(event.group_id), int(parts[1])
     if action == "设置超时":
-        raise ValueError("格式错误，请使用：设置超时 群号 分钟，或在群里直接发送：设置超时 分钟")
-    raise ValueError("格式错误，请使用：设置次数 群号 次数，或在群里直接发送：设置次数 次数")
+        raise ValueError("格式错误，请使用：设置超时 群号 分钟，或在群里发送：入群验证 设置超时 分钟")
+    raise ValueError("格式错误，请使用：设置次数 群号 次数，或在群里发送：入群验证 设置次数 次数")
