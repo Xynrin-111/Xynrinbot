@@ -18,7 +18,7 @@
     "provider": "external",
     "access_token": "",
     "lagrange_qr_dir": "",
-    "install_client": "true"
+    "install_client": "none"
   },
   "smtp": {
     "host": "",
